@@ -70,5 +70,5 @@ new_anno_val = {
     'infos': new_info_val,
     'metadata': nus_anno['metadata']
 }
-mmcv.dump(new_anno_train, os.path.join(nus_root_path, 'nuscenes_infos_temporal_val_new.pkl'))
+mmcv.dump(new_anno_val, os.path.join(nus_root_path, 'nuscenes_infos_temporal_val_new.pkl'))
 
