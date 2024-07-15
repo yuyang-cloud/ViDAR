@@ -155,6 +155,20 @@ GPU_NUM=8
 ./tools/dist_train.sh ${CONFIG} ${GPU_NUM}
 ```
 
+Train with planning包括两阶段：
+```bash
+GPU_NUM=8
+
+# Step1. Train the model with action_condition (gt action):
+CONFIG=projects/configs/vidar_pretrain/nusc/action_condition_fine.py
+./tools/dist_train.sh ${CONFIG} ${GPU_NUM}
+
+# Step2. Train the model with planning (pred action):
+CONFIG=projects/configs/vidar_pretrain/nusc/plan_traj_fine.py
+# 注意修改上述配置文件中 load_from='work_dirs/action_condition_fine/epoch24.pth'为Step1的预训练权重
+./tools/dist_train.sh ${CONFIG} ${GPU_NUM}
+```
+
 **3. Evaluate**
 
 ```bash
