@@ -39,7 +39,7 @@ pretrained
 tensorboard_comp
 dbg
 scripts
-viz
+viz/figs/
 work_dirs
 *dbg*
 archived
@@ -146,3 +146,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+*.pkl
