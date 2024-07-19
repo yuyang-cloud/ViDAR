@@ -24,9 +24,64 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmcv.cnn import xavier_init
 from torch.nn.init import normal_
 from ..utils import e2e_predictor_utils
-
+from mmdet3d.models import builder
 from mmdet3d.models.losses import chamfer_distance
+from einops import rearrange, repeat
+from ..modules.ray_operations.latent_rendering_v2 import Fourier_Embed as Fourier_Embed_v1
+import math
 
+def fourier_embedding(input, dim, max_period=10000, repeat_only=False):
+    """
+    Create sinusoidal input embeddings.
+
+    :param input: a 1-D Tensor of N indices, one per batch element. These may be fractional.
+    :param dim: the dimension of the output.
+    :param max_period: controls the minimum frequency of the embeddings.
+
+    :return: an [N x dim] Tensor of positional embeddings.
+    """
+
+    if repeat_only:
+        embedding = repeat(input, "b -> b d", d=dim)
+    else:
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32)
+            / half
+        ).to(device=input.device)
+        args = input[:, None].float() * freqs[None]
+        embedding = torch.cat((torch.cos(args), torch.sin(args)), dim=-1)
+        if dim % 2:
+            embedding = torch.cat((embedding, torch.zeros_like(embedding[:, :1])), dim=-1)
+    return embedding
+
+class Fourier_Embed(nn.Module):
+    def __init__(self, dim, embed_dim):
+        super().__init__()
+        self.dim = dim
+        self.embed_dim = embed_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(self.dim * self.embed_dim, 256),
+            nn.ReLU(inplace=True),
+        )
+
+    def init_weights(self):
+        """Initialize weights of the DeformDETR head."""
+        try:
+            xavier_init(self.mlp, distribution='uniform', bias=0.)
+        except:
+            pass
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        b, c = t.shape
+        # fourier embed
+        t = rearrange(t, "b c -> (b c)")
+        t = fourier_embedding(t, self.embed_dim)
+        t = rearrange(t, "(b c) c2 -> b (c c2)", b=b, c=c, c2=self.embed_dim)
+        # mlp
+        t = self.mlp(t)
+        return t
 
 @HEADS.register_module()
 class ViDARHeadTemplate(BaseModule):
@@ -35,14 +90,27 @@ class ViDARHeadTemplate(BaseModule):
 
     def __init__(self,
                  *args,
+                 num_classes,
                  # Architecture.
+                 prev_render_neck=None,
                  transformer=None,
                  num_pred_fcs=2,
                  num_pred_height=1,
 
+                 # Memory Queue configurations.
+                 memory_queue_len=1,
+                 turn_on_flow=False,
+                 sem_norm=False,
+                 obj_motion_norm=False,
+
                  # Embedding configuration.
+                 use_can_bus=False,
                  can_bus_norm=True,
                  can_bus_dims=(0, 1, 2, 17),
+                 use_plan_traj=True,
+                 condition_ca_add='add',
+                 use_command=False,
+                 use_vel_steering=False,
 
                  # target BEV configurations.
                  bev_h=30,
@@ -62,23 +130,56 @@ class ViDARHeadTemplate(BaseModule):
 
         # BEV configuration of reference frame.
         super().__init__(**kwargs)
-
+        self.num_classes = num_classes
         self.bev_h = bev_h
         self.bev_w = bev_w
         self.pc_range = pc_range
         self.real_w = self.pc_range[3] - self.pc_range[0]
         self.real_h = self.pc_range[4] - self.pc_range[1]
 
+        # memory queue
+        self.memory_queue_len = memory_queue_len
+        self.turn_on_flow = turn_on_flow
+        self.sem_norm = sem_norm
+        self.obj_motion_norm = obj_motion_norm
+        # fourier_embed
+        self.fourier_nhidden = 64
         # Embedding configurations.
         self.can_bus_norm = can_bus_norm
-        # valid dimensions for can_bus information.
-        self.can_bus_dims = can_bus_dims
+        self.use_can_bus = use_can_bus
+        self.can_bus_dims = can_bus_dims  # (delta_x, delta_y, delta_z, delta_yaw)
+        if self.use_can_bus:
+            self.fourier_embed_canbus = Fourier_Embed(len(self.can_bus_dims), self.fourier_nhidden)
+        # vel_steering
+        self.use_vel_steering = use_vel_steering
+        self.vel_steering_dims = 4        # (vx, vy, v_yaw, steering)
+        if self.use_vel_steering:
+            self.fourier_embed_velsteering = Fourier_Embed(self.vel_steering_dims, self.fourier_nhidden)
+        # command
+        self.use_command = use_command
+        self.command_dims = 1             # command
+        if self.use_command:
+            self.fourier_embed_command = Fourier_Embed(self.command_dims, self.fourier_nhidden)
+        # plan_traj
+        self.use_plan_traj = use_plan_traj
+        self.plan_traj_dims = 2
+        if self.use_plan_traj:
+            self.fourier_embed_plantraj = Fourier_Embed(self.plan_traj_dims, self.fourier_nhidden)
+        # action_condition
+        self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_command + 256 * use_plan_traj
+        self.condition_ca_add = condition_ca_add
 
         # Network configurations.
         self.num_pred_fcs = num_pred_fcs
         # How many bins predicted at the height dimensions.
         # By default, 1 for BEV prediction.
         self.num_pred_height = num_pred_height
+
+        # build prev_render_neck
+        if prev_render_neck is not None:
+            self.prev_render_neck = builder.build_head(prev_render_neck)
+        else:
+            self.prev_render_neck = None
 
         # build transformer architecture.
         self.positional_encoding = build_positional_encoding(
@@ -93,23 +194,72 @@ class ViDARHeadTemplate(BaseModule):
         # set evaluation configurations.
         self.eval_within_grid = eval_within_grid
         self._init_layers()
+        
+        if self.sem_norm and not self.turn_on_flow: # occ pred_head
+            sem_raymarching_branch = []
+            for _ in range(self.num_pred_fcs):
+                sem_raymarching_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
+                sem_raymarching_branch.append(nn.LayerNorm(self.embed_dims))
+                sem_raymarching_branch.append(nn.ReLU(inplace=True))
+            sem_raymarching_branch.append(nn.Linear(self.embed_dims, self.num_pred_height * self.num_classes))   # C -> cls
+            self.sem_raymarching_branch = nn.Sequential(*sem_raymarching_branch)
+
+            self.param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
+
+            nhidden = 32
+            self.mlp_shared = nn.Sequential(
+                nn.Conv3d(self.num_classes, nhidden, kernel_size=3, padding=1),
+                nn.ReLU()
+            )
+            self.mlp_gamma = nn.Conv3d(nhidden, self.embed_dims // self.num_pred_height, kernel_size=3, padding=1)
+            self.mlp_beta = nn.Conv3d(nhidden, self.embed_dims // self.num_pred_height, kernel_size=3, padding=1)
+            self.reset_parameters()
+
+        if self.obj_motion_norm and self.turn_on_flow: # flow pred_head
+            flow_raymarching_branch = []
+            flow_raymarching_branch.append(nn.Linear(self.embed_dims, self.num_pred_height * self.num_classes))   # C -> cls
+            self.flow_raymarching_branch = nn.Sequential(*flow_raymarching_branch)
+
+            self.param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
+
+            nhidden = 32
+            self.fourier_embed = Fourier_Embed_v1(nhidden)
+
+            self.mlp_shared = nn.Sequential(
+                nn.Conv3d(self.num_classes * nhidden, nhidden, kernel_size=3, padding=1),
+                nn.ReLU()
+            )
+            self.mlp_gamma = nn.Conv3d(nhidden, self.embed_dims // self.num_pred_height, kernel_size=3, padding=1)
+            self.mlp_beta = nn.Conv3d(nhidden, self.embed_dims // self.num_pred_height, kernel_size=3, padding=1)
+            self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.zeros_(self.mlp_gamma.weight)
+        nn.init.zeros_(self.mlp_beta.weight)
+        nn.init.ones_(self.mlp_gamma.bias)
+        nn.init.zeros_(self.mlp_beta.bias)
 
     def _init_layers(self):
         """Initialize BEV prediction head."""
         # BEV query for the next frame.
         self.bev_embedding = nn.Embedding(self.bev_h * self.bev_w, self.embed_dims)
         # Embeds for previous frame number.
-        self.prev_frame_embedding = nn.Parameter(torch.Tensor(1, self.embed_dims))
+        self.prev_frame_embedding = nn.Parameter(torch.Tensor(self.memory_queue_len, self.embed_dims))
         # Embeds for CanBus information.
         # Use position & orientation information of next frame's canbus.
-        self.can_bus_mlp = nn.Sequential(
-            nn.Linear(len(self.can_bus_dims), self.embed_dims // 2),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.embed_dims // 2, self.embed_dims),
-            nn.ReLU(inplace=True),
-        )
-        if self.can_bus_norm:
-            self.can_bus_mlp.add_module('norm', nn.LayerNorm(self.embed_dims))
+        if (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj) and self.condition_ca_add == 'add':
+            can_bus_input_dim = self.action_condition_dims
+        elif (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj) and self.condition_ca_add == 'ca':
+            can_bus_input_dim = self.action_condition_dims
+        if self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj:
+            self.fusion_mlp = nn.Sequential(
+                nn.Linear(can_bus_input_dim, self.embed_dims),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.embed_dims, self.embed_dims),
+                nn.ReLU(inplace=True),
+            )
+            if self.can_bus_norm:
+                self.fusion_mlp.add_module('norm', nn.LayerNorm(self.embed_dims))
 
     def init_weights(self):
         """Initialize weights of the DeformDETR head."""
@@ -117,13 +267,101 @@ class ViDARHeadTemplate(BaseModule):
             self.transformer.init_weights()
             # Initialization of embeddings.
             normal_(self.prev_frame_embedding)
-            xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
+            xavier_init(self.fusion_mlp, distribution='uniform', bias=0.)
         except:
             pass
 
+    def forward_sem_norm(self, next_bev_feats):
+        """
+        Args:
+            next_bev_feats (Tensor): inter_num, bs, hw, c
+        """
+        inter_num, B, HW, C = next_bev_feats.shape
+        next_bev_feats = next_bev_feats.view(inter_num*B, self.bev_w, self.bev_h, C).transpose(1,2)    # inter_num*B, H,W,C
+
+        # 1. obtain semantic prediction.
+        sem_pred = self.sem_raymarching_branch(next_bev_feats)  # inter_num*B, H,W, D*cls
+        sem_pred = sem_pred.view(*sem_pred.shape[:-1], self.num_pred_height, self.num_classes) # inter*B,H,W,D,cls 
+        sem_label = torch.argmax(sem_pred.detach(), dim=-1)     # inter*B,H,W,D
+        # breakpoint()
+        # import matplotlib.pyplot as plt
+        # plt.imshow(sem_label[0,0].max(-1)[0].detach().cpu().numpy())
+        # plt.show()
+        # breakpoint()
+        sem_code = F.one_hot(sem_label.long(), num_classes=self.num_classes).float().permute(0,4,1,2,3).contiguous() # inter*B,cls,H,W,D
+
+        # 2. generate parameter-free normalized activations
+        next_bev_feats = self.param_free_norm(next_bev_feats)
+        next_bev_feats = next_bev_feats.view(*next_bev_feats.shape[:-1], self.num_pred_height, -1)  # inter*B,H,W,D,C'
+        # breakpoint()
+        # import matplotlib.pyplot as plt
+        # plt.imshow(embed[0].max(0)[0].detach().cpu().numpy())
+        # plt.show()
+        # breakpoint()
+
+        # 3. produce scaling and bias conditioned on semantic map
+        actv = self.mlp_shared(sem_code)    # inter*B,C',H,W,D
+        gamma = self.mlp_gamma(actv).permute(0,2,3,4,1) # inter*B,H,W,D,C'
+        beta = self.mlp_beta(actv).permute(0,2,3,4,1)   # inter*B,H,W,D,C'
+
+        # apply scale and bias
+        next_bev_feats = (gamma * next_bev_feats + beta).contiguous()
+        next_bev_feats = next_bev_feats.view(inter_num, B, self.bev_h, self.bev_w, C).transpose(2,3).flatten(2,3)  # inter,B,HW,C
+
+        sem_pred = sem_pred.view(inter_num, B, *sem_pred.shape[1:]).permute(0,1,5,2,3,4)    # inter,B,cls,H,W,D
+
+        return next_bev_feats, sem_pred
+
+    def forward_obj_motion_norm(self, next_bev_feats, occ_3D):
+        """
+        Args:
+            next_bev_feats (Tensor): inter_num, bs, hw, c
+            occ_3D: inter,bs,hw,d
+        """
+        # next_bev_feats
+        inter_num, B, HW, C = next_bev_feats.shape
+        next_bev_feats = next_bev_feats.view(inter_num*B, self.bev_w, self.bev_h, C).transpose(1,2)    # inter_num*B, H,W,C
+        # occ_3D
+        occ_3D = occ_3D.repeat(inter_num, 1, 1, 1).contiguous()
+        occ_3D = occ_3D.view(inter_num*B, self.bev_w, self.bev_h, self.num_pred_height).transpose(1,2)  # inter_num*B, H,W,D
+
+        # 1. obtain flow prediction.
+        flow_pred = self.flow_raymarching_branch(next_bev_feats)  # inter_num*B, H,W, D*3
+        flow_pred = flow_pred.view(*flow_pred.shape[:-1], self.num_pred_height, self.num_classes) # inter*B,H,W,D,3
+        flow_label = flow_pred.detach() * (occ_3D > 0).float().unsqueeze(-1)    # inter*B,H,W,D,3
+        # breakpoint()
+        # import matplotlib.pyplot as plt
+        # plt.imshow(flow_label[0].mean(2)[...,1].detach().cpu().numpy())
+        # plt.show()
+        # breakpoint()
+        flow_label = rearrange(flow_label, "b h w d c -> (b h w d c)")
+
+        # 2. fourier embed
+        flow_label = self.fourier_embed(flow_label)
+        flow_label = rearrange(flow_label, "(b h w d c) c2 -> b h w d (c c2)", 
+                            b=B, h=self.bev_h, w=self.bev_w, d=self.num_pred_height, c=self.num_classes, c2=self.fourier_embed.dim)
+        flow_label = flow_label.permute(0,4,1,2,3)  # inter*B,C,H,W,D
+
+        # 3. generate parameter-free normalized activations
+        next_bev_feats = self.param_free_norm(next_bev_feats)
+        next_bev_feats = next_bev_feats.view(*next_bev_feats.shape[:-1], self.num_pred_height, -1)  # inter*B,H,W,D,C'
+
+        # 3. produce scaling and bias conditioned on semantic map
+        actv = self.mlp_shared(flow_label)    # inter*B,C',H,W,D
+        gamma = self.mlp_gamma(actv).permute(0,2,3,4,1) # inter*B,H,W,D,C'
+        beta = self.mlp_beta(actv).permute(0,2,3,4,1)   # inter*B,H,W,D,C'
+
+        # apply scale and bias
+        next_bev_feats = (gamma * next_bev_feats + beta).contiguous()
+        next_bev_feats = next_bev_feats.view(inter_num, B, self.bev_h, self.bev_w, C).transpose(2,3).flatten(2,3)  # inter,B,HW,C
+
+        flow_pred = flow_pred.view(inter_num, B, *flow_pred.shape[1:]).permute(0,1,5,2,3,4)    # inter,B,cls,H,W,D
+
+        return next_bev_feats, flow_pred
+
     @auto_fp16(apply_to=('prev_features'))
-    def _get_next_bev_features(self, prev_features, img_metas, target_frame_index,
-                               tgt_points, ref_points, bev_h, bev_w,):
+    def _get_next_bev_features(self, prev_features, img_metas, target_frame_index, plan_traj, command, vel_steering,
+                               tgt_points, ref_points, bev_h, bev_w, bev_sem_gts=None, flow_3D=None, occ_3D=None, future2history=None):
         """ Forward function for each frame.
 
         Args:
@@ -137,7 +375,7 @@ class ViDARHeadTemplate(BaseModule):
             tgt_points (Tensor): query point coordinates in target frame coordinates.
             ref_points (Tensor): query point coordinates in previous frame coordinates.
         """
-        bs = prev_features.shape[0]
+        bs, num_frames, _, emebd_dim = prev_features.shape
         dtype = prev_features.dtype
         #  * BEV queries.
         bev_queries = self.bev_embedding.weight.to(dtype)  # bev_h * bev_w, bev_dims
@@ -145,41 +383,106 @@ class ViDARHeadTemplate(BaseModule):
         bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
                                device=bev_queries.device).to(dtype)
         bev_pos = self.positional_encoding(bev_mask).to(dtype)  # bs, bev_dims, bev_h, bev_w
-        #   * Can-bus information.
-        cur_can_bus = [img_meta['future_can_bus'][target_frame_index] for img_meta in img_metas]
-        cur_can_bus = np.array(cur_can_bus)[:, self.can_bus_dims]  # bs, 18
-        cur_can_bus = torch.from_numpy(cur_can_bus).to(dtype).to(bev_pos.device)
-        cur_can_bus_embedding = self.can_bus_mlp(cur_can_bus)
+
+        action_condition = None
+        if self.use_can_bus:
+            #   * Can-bus information.
+            cur_can_bus = [img_meta['future_can_bus'][target_frame_index] for img_meta in img_metas]
+            cur_can_bus = np.array(cur_can_bus)[:, self.can_bus_dims]  # bs, 18
+            cur_can_bus = torch.from_numpy(cur_can_bus).to(dtype).to(bev_pos.device)    # bs,4  (delta_x, delta_y, delta_z, delta_yaw)
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                cur_can_bus = self.fourier_embed_canbus(cur_can_bus)
+            action_condition = cur_can_bus
+
+        elif self.use_plan_traj:
+            #  * Plan Traj
+            cur_can_bus = plan_traj[:, -1, :2].float() # bs, 2
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                cur_can_bus = self.fourier_embed_plantraj(cur_can_bus)
+            action_condition = cur_can_bus
+
+        if self.use_command:
+            command = command.unsqueeze(0)  # bs,1 (command)
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                command = self.fourier_embed_command(command)
+            if action_condition is None:
+                action_condition = command
+            else:
+                action_condition = torch.cat([action_condition, command], dim=-1)
+
+        if self.use_vel_steering:
+            # vel_steering: bs,4  (vx, vy, v_yaw, steering)
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                vel_steering = self.fourier_embed_velsteering(vel_steering)
+            if action_condition is None:
+                action_condition = vel_steering
+            else:
+                action_condition = torch.cat([action_condition, vel_steering], dim=-1)
+        
+        if action_condition is not None:
+            action_condition = self.fusion_mlp(action_condition)
+
         #  * sum different query embedding together.
         #    (bs, bev_h * bev_w, dims)
-        bev_queries_input = bev_queries + cur_can_bus_embedding.unsqueeze(1)
+        if (self.use_can_bus or self.use_plan_traj) and self.condition_ca_add == 'add':
+            bev_queries_input = bev_queries + action_condition.unsqueeze(1)
+        else:
+            bev_queries_input = bev_queries
 
-        # 2. obtain frame embeddings (bs, num_frames, bev_h * bev_w, dims).
+        # 2. obtain prev embeddings (bs, num_frames, bev_h * bev_w, dims).
+        if self.prev_render_neck:
+            render_dict = self.prev_render_neck(prev_features.view(bs, num_frames, bev_w, bev_h, emebd_dim).transpose(2,3), 
+                                                bev_sem_gts, flow_3D, occ_3D, future2history)
+            prev_features = render_dict['bev_embed']
+            bev_occ_pred = render_dict['bev_occ_pred']  # B,D,H,W
+            bev_sem_pred = render_dict['bev_sem_pred']  # B,cls,H,W
+            san_saw_output = render_dict['san_saw_output']
+
         frame_embedding = self.prev_frame_embedding
         prev_features_input = (prev_features +
                                frame_embedding[None, :, None, :])
 
         # 3. do transformer layers to get BEV features.
         next_bev_feat = self.transformer(
-            prev_features_input,
-            bev_queries_input,
-            tgt_points=tgt_points,
-            ref_points=ref_points,
+            prev_features_input,    # B, n_frame, h*w, c
+            bev_queries_input,      # B, h*w, c
+            tgt_points=tgt_points,  # B, h*w, 2
+            ref_points=ref_points,  # B, h*w, history_num, 2
             bev_h=bev_h,
             bev_w=bev_w,
             bev_pos=bev_pos,
             img_metas=img_metas,
+            action_condition=action_condition,
         )  # inter_num, bs, bev_h*bev_w, embed_dims
-        return next_bev_feat
+
+        # 4. sem_norm
+        if self.sem_norm and not self.turn_on_flow:
+            next_bev_feat, bev_sem_pred = self.forward_sem_norm(next_bev_feat)
+        # 4. obj_motion_norm
+        if self.obj_motion_norm and self.turn_on_flow:
+            next_bev_feat, bev_sem_pred = self.forward_obj_motion_norm(next_bev_feat, occ_3D)
+
+        return next_bev_feat, bev_occ_pred, bev_sem_pred, san_saw_output
 
     @auto_fp16(apply_to=('mlvl_feats'))
     def forward(self,
                 prev_feats,
                 img_metas,
                 target_frame_index,
+                plan_traj,
+                command,
+                vel_steering,
                 tgt_points,  # tgt_points config for self-attention.
                 ref_points,  # ref_points config for cross-attention.
-                bev_h, bev_w):
+                bev_h, bev_w,
+                bev_sem_gts=None,
+                flow_3D=None,
+                occ_3D=None,
+                future2history=None):
         f"""Forward function: a wrapper function for self._get_next_bev_features
         
         From previous multi-frame BEV features (mlvl_feats) predict 
@@ -202,10 +505,10 @@ class ViDARHeadTemplate(BaseModule):
         assert bev_h * bev_w == bev_grids_num
         assert bev_h * bev_w == tgt_points.shape[1]
 
-        next_bev_feat = self._get_next_bev_features(
-            prev_feats, img_metas, target_frame_index,
-            tgt_points, ref_points, bev_h, bev_w)
-        return next_bev_feat
+        next_bev_feat, bev_occ_pred, bev_sem_pred, san_saw_output = self._get_next_bev_features(
+            prev_feats, img_metas, target_frame_index, plan_traj, command, vel_steering,
+            tgt_points, ref_points, bev_h, bev_w, bev_sem_gts, flow_3D, occ_3D, future2history)
+        return next_bev_feat, bev_occ_pred, bev_sem_pred, san_saw_output
 
     def forward_head(self, next_bev_feats):
         """Get freespace estimation from multi-frame BEV feature maps.
@@ -525,17 +828,18 @@ class ViDARHeadBase(ViDARHeadTemplate):
             pred_dict: A dictionary maintaining the point cloud prediction of different frames.
             gt_points: A list of concantenated point clouds.
                 The size of list represents {bs}, the last dimension of point clouds
-                indicate the timestamp of different frame.
+                indicate the timestamp of different frame.  # bs*[N,4  xyzt] 
             start_idx: the first item in pred_dict represents of which frame.
                 If pred_cur_frame, start_idx should be 0;
                 else start_idx should be 1;
             img_metas:
+            batched_origin_points: bs,Lout,3
         Returns:
             dict[str, Tensor]: A dictionary of loss components.
         """
         # Pre-process predicted results.
         valid_frames = pred_dict['valid_frames']
-        bev_preds = pred_dict['next_bev_preds']
+        bev_preds = pred_dict['next_bev_preds'] # Lout, inter_num, bs, h*w, d  每一帧的前后i帧
 
         bev_preds = bev_preds[:, -1:]  # only select the last feature as outputs.
         valid_frame_num, inter_num, bs, token_num, num_height_pred = bev_preds.shape
@@ -549,9 +853,12 @@ class ViDARHeadBase(ViDARHeadTemplate):
             valid_frames, start_idx, pred_frame_num,
             tgt_bev_h, tgt_bev_w, tgt_pc_range
         )
+        # batched_origin_grids, batched_origin_points: B,Lout,3      每帧原点的体素坐标、原坐标
+        # batched_gt_grids, batched_gt_points:         B,Lout,N,3    每帧点云的体素坐标、原坐标
+        # batched_gt_tindex:                           B,Lout        每帧点对应的frame_t
 
         # compute directional orientation vector to each point.
-        intermediate_sigma = []
+        intermediate_sigma = [] # inter_num,[bs, Lout, d,h,w]
         for i in range(inter_num):
             # valid_frame_num, bs, bev_h * bev_w, num_height_pred
             # --> bs, valid_frame_num, num_height, bev_h * bev_w

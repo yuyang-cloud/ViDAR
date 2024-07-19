@@ -3,3 +3,5 @@ from .bev_head import BEVHead
 
 from .vidar_bevformer_head import ViDARBEVFormerHead
 from .vidar_head_v1 import ViDARHeadV1
+
+from .plan_head import PlanHead, PlanHead_v2
