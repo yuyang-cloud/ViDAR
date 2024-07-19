@@ -1,1 +1,2 @@
 from .latent_rendering import LatentRendering
+from .latent_rendering_v2 import LatentRenderingV2
