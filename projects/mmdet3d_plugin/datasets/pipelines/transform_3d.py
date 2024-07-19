@@ -249,7 +249,7 @@ class CustomCollect3D(object):
                             'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',
                             'img_norm_cfg', 'pcd_trans', 'sample_idx', 'prev_idx', 'next_idx',
                             'pcd_scale_factor', 'pcd_rotation', 'pts_filename',
-                            'transformation_3d_flow', 'scene_token',
+                            'transformation_3d_flow', 'scene_token', 'lidar_token',
                             'can_bus',
                             'ego2global_translation', 'ego2global_rotation',
                             'lidar2ego_translation', 'lidar2ego_rotation',

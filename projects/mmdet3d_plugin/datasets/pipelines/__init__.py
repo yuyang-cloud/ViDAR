@@ -6,6 +6,8 @@ from .augmentation import (CropResizeFlipImage, GlobalRotScaleTransImage, Random
 from .dd3d_mapper import DD3DMapper
 from .loading import CustomLoadPointsFromMultiSweeps, CustomVoxelBasedPointSampler
 from .nuplan_loading import LoadNuPlanPointsFromFile, LoadNuPlanPointsFromMultiSweeps
+from .loading_instance import LoadInstanceWithFlow
+from .loading_occupancy import LoadOccupancy
 __all__ = [
     'PadMultiViewImage', 'NormalizeMultiviewImage', 
     'PhotoMetricDistortionMultiViewImage', 'CustomDefaultFormatBundle3D', 'CustomCollect3D',
@@ -14,4 +16,5 @@ __all__ = [
     'DD3DMapper',
     'CustomLoadPointsFromMultiSweeps', 'CustomVoxelBasedPointSampler',
     'LoadNuPlanPointsFromFile', 'LoadNuPlanPointsFromMultiSweeps',
+    'LoadInstanceWithFlow', 'LoadOccupancy'
 ]
