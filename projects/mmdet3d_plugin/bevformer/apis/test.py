@@ -1,3 +1,4 @@
+
 # ---------------------------------------------
 # Copyright (c) OpenMMLab. All rights reserved.
 # ---------------------------------------------
@@ -42,7 +43,79 @@ def custom_encode_mask_results(mask_results):
                         dtype='uint8'))[0])  # encoded with RLE
     return [encoded_mask_results]
 
-def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
+# def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
+#     """Test model with multiple gpus.
+#     This method tests model with multiple gpus and collects the results
+#     under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
+#     it encodes results to gpu tensors and use gpu communication for results
+#     collection. On cpu mode it saves the results on different gpus to 'tmpdir'
+#     and collects them by the rank 0 worker.
+#     Args:
+#         model (nn.Module): Model to be tested.
+#         data_loader (nn.Dataloader): Pytorch data loader.
+#         tmpdir (str): Path of directory to save the temporary results from
+#             different gpus under cpu mode.
+#         gpu_collect (bool): Option to use either gpu or cpu to collect results.
+#     Returns:
+#         list: The prediction results.
+#     """
+#     model.eval()
+#     bbox_results = []
+#     mask_results = []
+#     dataset = data_loader.dataset
+#     rank, world_size = get_dist_info()
+#     if rank == 0:
+#         prog_bar = mmcv.ProgressBar(len(dataset))
+#     time.sleep(2)  # This line can prevent deadlock problem in some cases.
+#     have_mask = False
+#     for i, data in enumerate(data_loader):
+#         with torch.no_grad():
+#             result = model(return_loss=False, rescale=True, **data)
+#             # encode mask results
+#             if isinstance(result, dict):
+#                 if 'bbox_results' in result.keys():
+#                     bbox_result = result['bbox_results']
+#                     batch_size = len(result['bbox_results'])
+#                     bbox_results.extend(bbox_result)
+#                 if 'mask_results' in result.keys() and result['mask_results'] is not None:
+#                     mask_result = custom_encode_mask_results(result['mask_results'])
+#                     mask_results.extend(mask_result)
+#                     have_mask = True
+#             else:
+#                 batch_size = len(result)
+#                 bbox_results.extend(result)
+#             torch.cuda.empty_cache()
+
+#             #if isinstance(result[0], tuple):
+#             #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
+#             #    result = [(bbox_results, encode_mask_results(mask_results))
+#             #              for bbox_results, mask_results in result]
+#         if rank == 0:
+            
+#             for _ in range(batch_size * world_size):
+#                 prog_bar.update()
+
+#     # collect results from all ranks
+#     if gpu_collect:
+#         bbox_results = collect_results_gpu(bbox_results, len(dataset))
+#         if have_mask:
+#             mask_results = collect_results_gpu(mask_results, len(dataset))
+#         else:
+#             mask_results = None
+#     else:
+#         bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
+#         tmpdir = tmpdir+'_mask' if tmpdir is not None else None
+#         if have_mask:
+#             mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
+#         else:
+#             mask_results = None
+
+#     if mask_results is None:
+#         return bbox_results
+#     return {'bbox_results': bbox_results, 'mask_results': mask_results}
+
+
+def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, show=False, out_dir=None):
     """Test model with multiple gpus.
     This method tests model with multiple gpus and collects the results
     under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
@@ -58,61 +131,110 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     Returns:
         list: The prediction results.
     """
+
     model.eval()
-    bbox_results = []
-    mask_results = []
+    
+    # init predictions
+    iou_metric = []
+    iou_current_metric = []
+    iou_future_metric = []
+    iou_future_time_weighting_metric = []
+    vpq_metric = []
+    plan_metric = {
+            'plan_L2_1s':[],
+            'plan_L2_2s':[],
+            'plan_L2_3s':[],
+            'plan_obj_col_1s':[],
+            'plan_obj_col_2s':[],
+            'plan_obj_col_3s':[],
+            'plan_obj_box_col_1s':[],
+            'plan_obj_box_col_2s':[],
+            'plan_obj_box_col_3s':[],
+            'plan_L2_1s_single':[],
+            'plan_L2_2s_single':[],
+            'plan_L2_3s_single':[],
+            'plan_obj_col_1s_single':[],
+            'plan_obj_col_2s_single':[],
+            'plan_obj_col_3s_single':[],
+            'plan_obj_box_col_1s_single':[],
+            'plan_obj_box_col_2s_single':[],
+            'plan_obj_box_col_3s_single':[],
+    }
+
     dataset = data_loader.dataset
     rank, world_size = get_dist_info()
     if rank == 0:
         prog_bar = mmcv.ProgressBar(len(dataset))
+    
     time.sleep(2)  # This line can prevent deadlock problem in some cases.
-    have_mask = False
+    
     for i, data in enumerate(data_loader):
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
-            # encode mask results
-            if isinstance(result, dict):
-                if 'bbox_results' in result.keys():
-                    bbox_result = result['bbox_results']
-                    batch_size = len(result['bbox_results'])
-                    bbox_results.extend(bbox_result)
-                if 'mask_results' in result.keys() and result['mask_results'] is not None:
-                    mask_result = custom_encode_mask_results(result['mask_results'])
-                    mask_results.extend(mask_result)
-                    have_mask = True
-            else:
-                batch_size = len(result)
-                bbox_results.extend(result)
-            torch.cuda.empty_cache()
 
-            #if isinstance(result[0], tuple):
-            #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
-            #    result = [(bbox_results, encode_mask_results(mask_results))
-            #              for bbox_results, mask_results in result]
+        with torch.no_grad():
+
+            result = model(return_loss=False, rescale=True, **data)
+
+            if 'hist_for_iou' in result.keys():
+                iou_metric.append(result['hist_for_iou'])
+            if 'hist_for_iou_current' in result.keys():
+                iou_current_metric.append(result['hist_for_iou_current'])
+            if 'hist_for_iou_future' in result.keys():
+                iou_future_metric.append(result['hist_for_iou_future'])
+            if 'hist_for_iou_future_time_weighting' in result.keys():
+                iou_future_time_weighting_metric.append(result['hist_for_iou_future_time_weighting'])
+            if 'vpq' in result.keys():
+                vpq_metric.append(result['vpq'])
+            if 'plan_metric' in result.keys():
+                for key in plan_metric.keys():
+                    plan_metric[key].append(result['plan_metric'][key])
+
+            batch_size = 1
+                
         if rank == 0:
-            
             for _ in range(batch_size * world_size):
                 prog_bar.update()
 
-    # collect results from all ranks
-    if gpu_collect:
-        bbox_results = collect_results_gpu(bbox_results, len(dataset))
-        if have_mask:
-            mask_results = collect_results_gpu(mask_results, len(dataset))
-        else:
-            mask_results = None
-    else:
-        bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
-        tmpdir = tmpdir+'_mask' if tmpdir is not None else None
-        if have_mask:
-            mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
-        else:
-            mask_results = None
+    # collect lists from multi-GPUs
+    res = {}
 
-    if mask_results is None:
-        return bbox_results
-    return {'bbox_results': bbox_results, 'mask_results': mask_results}
+    if 'hist_for_iou' in result.keys():
+        iou_metric = [sum(iou_metric)]
+        iou_metric = collect_results_cpu(iou_metric, len(dataset), tmpdir)
+        res['hist_for_iou'] = iou_metric
 
+    if 'hist_for_iou_current' in result.keys():
+        iou_current_metric = [sum(iou_current_metric)]
+        iou_current_metric = collect_results_cpu(iou_current_metric, len(dataset), tmpdir)
+        res['hist_for_iou_current'] = iou_current_metric
+
+    if 'hist_for_iou_future' in result.keys():
+        iou_future_metric = [sum(iou_future_metric)]
+        iou_future_metric = collect_results_cpu(iou_future_metric, len(dataset), tmpdir)
+        res['hist_for_iou_future'] = iou_future_metric
+
+    if 'hist_for_iou_future_time_weighting' in result.keys():
+        iou_future_time_weighting_metric = [sum(iou_future_time_weighting_metric)]
+        iou_future_time_weighting_metric = collect_results_cpu(iou_future_time_weighting_metric, len(dataset), tmpdir)
+        res['hist_for_iou_future_time_weighting'] = iou_future_time_weighting_metric
+
+    if 'vpq' in result.keys():
+        res['vpq_len'] = len(dataset)   # 5569
+        vpq_metric = [sum(vpq_metric)]  # [一张卡上所有样本的和]
+        vpq_metric = collect_results_cpu(vpq_metric, len(dataset), tmpdir)  # [每张 卡上所有样本的和]
+        res['vpq_metric'] = vpq_metric
+
+    if 'plan_metric' in result.keys():
+        res['data_len'] = len(dataset)
+        plan_metric = {key:[sum(plan_metric[key])] for key in plan_metric.keys()}
+        plan_metric = {key:collect_results_cpu(plan_metric[key], len(dataset), tmpdir) for key in plan_metric.keys()}
+        res['plan_metric'] = plan_metric
+    # v2
+    if model.module.turn_on_plan:
+        planning_result = model.module.planning_metric_v2.compute()
+        model.module.planning_metric_v2.reset()
+        res['planning_results_computed'] = planning_result
+
+    return res
 
 def collect_results_cpu(result_part, size, tmpdir=None):
     rank, world_size = get_dist_info()
