@@ -146,10 +146,10 @@ class GroupMultiheadAttention(BaseModule):
 
         num_queries = query.shape[0]
         bs = query.shape[1]
-        if self.training:
-            query = torch.cat(query.split(num_queries // self.group, dim=0), dim=1)
-            key = torch.cat(key.split(num_queries // self.group, dim=0), dim=1)
-            value = torch.cat(value.split(num_queries // self.group, dim=0), dim=1)
+        # if self.training:
+        #     query = torch.cat(query.split(num_queries // self.group, dim=0), dim=1)
+        #     key = torch.cat(key.split(num_queries // self.group, dim=0), dim=1)
+        #     value = torch.cat(value.split(num_queries // self.group, dim=0), dim=1)
 
         out = self.attn(query=query, key=key, value=value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)[0]
 

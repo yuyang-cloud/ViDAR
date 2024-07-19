@@ -3,7 +3,7 @@ from .transformerV2 import PerceptionTransformerV2, PerceptionTransformerBEVEnco
 from .spatial_cross_attention import SpatialCrossAttention, MSDeformableAttention3D
 from .temporal_self_attention import TemporalSelfAttention
 from .encoder import BEVFormerEncoder, BEVFormerLayer
-from .decoder import DetectionTransformerDecoder, CustomMSDeformableAttention
+from .decoder import DetectionTransformerDecoder
 from .group_attention import GroupMultiheadAttention
 
 from .vidar_transformer import PredictionTransformer
@@ -13,3 +13,4 @@ from .vidar_decoder import (PredictionDecoder,
 
 from .encoder_v2 import BEVFormerLayerV2, CustomBEVFormerEncoder, CustomPerceptionTransformer
 from .ray_operations import *
+from .SAN_SAW import SAN, SAW

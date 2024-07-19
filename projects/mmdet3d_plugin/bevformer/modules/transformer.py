@@ -13,11 +13,13 @@ from mmcv.runner.base_module import BaseModule
 
 from mmdet.models.utils.builder import TRANSFORMER
 from torch.nn.init import normal_
+from projects.mmdet3d_plugin.models.utils.visual import save_tensor
 from mmcv.runner.base_module import BaseModule
 from torchvision.transforms.functional import rotate
 from .temporal_self_attention import TemporalSelfAttention
 from .spatial_cross_attention import MSDeformableAttention3D
 from .decoder import CustomMSDeformableAttention
+from projects.mmdet3d_plugin.models.utils.bricks import run_time
 from mmcv.runner import force_fp32, auto_fp16
 
 
@@ -111,27 +113,29 @@ class PerceptionTransformer(BaseModule):
             **kwargs):
         """
         obtain bev features.
+            mlvl_feats: stages*[B,Ncams,C,H,W]
+            bev_queries: H*W, C
         """
 
         bs = mlvl_feats[0].size(0)
-        bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
-        bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
+        bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1) # HW,B,C
+        bev_pos = bev_pos.flatten(2).permute(2, 0, 1)   # HW,B,C
 
         # Unified alignment method for both nuPlan and nuScenes.
         # obtain rotation angle and shift with ego motion
-        delta_global = np.array([each['can_bus'][:3] for each in kwargs['img_metas']])
+        delta_global = np.array([each['can_bus'][:3] for each in kwargs['img_metas']])  # total_len,3  -4帧为0,其余帧为global下的delta_xyz 
         lidar2global_rotation = np.array([each['lidar2global_rotation'] for each in kwargs['img_metas']])
         delta_lidar = []
         for i in range(bs):
             delta_lidar.append(np.linalg.inv(lidar2global_rotation[i]) @ delta_global[i])
-        delta_lidar = np.array(delta_lidar)
+        delta_lidar = np.array(delta_lidar) # total_len, 3  -4帧为0,其余帧为lidar坐标系下的delta_xyz
         grid_length_y = grid_length[0]
         grid_length_x = grid_length[1]
         shift_y = delta_lidar[:, 1] / grid_length_y / bev_h
         shift_x = delta_lidar[:, 0] / grid_length_x / bev_w
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
-        shift = bev_queries.new_tensor([shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
+        shift = bev_queries.new_tensor(np.array([shift_x, shift_y])).permute(1, 0)  # xy, bs -> bs, xy    bev平面下的delta_xy
 
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
@@ -158,10 +162,10 @@ class PerceptionTransformer(BaseModule):
 
         feat_flatten = []
         spatial_shapes = []
-        for lvl, feat in enumerate(mlvl_feats):
+        for lvl, feat in enumerate(mlvl_feats): # mlvl_feats: stages*[B,Ncams,C,H,W]
             bs, num_cam, c, h, w = feat.shape
             spatial_shape = (h, w)
-            feat = feat.flatten(3).permute(1, 0, 3, 2)
+            feat = feat.flatten(3).permute(1, 0, 3, 2)  # Ncams,B,HW,C
             if self.use_cams_embeds:
                 feat = feat + self.cams_embeds[:, None, None, :].to(feat.dtype)
             feat = feat + self.level_embeds[None,
@@ -169,26 +173,26 @@ class PerceptionTransformer(BaseModule):
             spatial_shapes.append(spatial_shape)
             feat_flatten.append(feat)
 
-        feat_flatten = torch.cat(feat_flatten, 2)
-        spatial_shapes = torch.as_tensor(
+        feat_flatten = torch.cat(feat_flatten, 2)   # Ncams,B,HW_total,C
+        spatial_shapes = torch.as_tensor(           # stages,2  (h_stage,w_stage)
             spatial_shapes, dtype=torch.long, device=bev_pos.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
 
         feat_flatten = feat_flatten.permute(
-            0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
+            0, 2, 1, 3)  # (num_cam, HW_total, bs, embed_dims)
 
         bev_embed = self.encoder(
-            bev_queries,
-            feat_flatten,
+            bev_queries,    # HW,B,C
+            feat_flatten,   # Ncams,HW_total,B,C
             feat_flatten,
             bev_h=bev_h,
             bev_w=bev_w,
-            bev_pos=bev_pos,
+            bev_pos=bev_pos,    # HW,B,C
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
-            prev_bev=prev_bev,
-            shift=shift,
+            prev_bev=prev_bev,  # HW,B,C
+            shift=shift,        # bs, xy    bev平面下的delta_xy
             **kwargs
         )
 

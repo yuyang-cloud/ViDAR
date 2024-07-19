@@ -97,8 +97,8 @@ class PredictionDecoder(TransformerLayerSequence):
 
         if self.return_intermediate:
             return torch.stack(intermediate)
-
-        return output
+        else:
+            return output.unsqueeze(0)
 
 
 @TRANSFORMER_LAYER.register_module()
@@ -267,10 +267,182 @@ class PredictionTransformerLayer(MyCustomBaseTransformerLayer):
                 attn_index += 1
                 identity = query
 
+            # cross-attention with action condition
+            elif layer == 'cross_attn_action':
+                action_condition = kwargs['action_condition'].unsqueeze(1)
+                query = self.attentions[attn_index](
+                    query,
+                    action_condition,
+                    action_condition,
+                    identity if self.pre_norm else None,
+                    query_pos=bev_pos,
+                    **kwargs)
+                attn_index += 1
+                identity = query
+
             elif layer == 'latent_render':
                 bs, token_num, embed_dim = query.shape
                 query = self.latent_render(query.view(bs, bev_h, bev_w, embed_dim))
                 query = query.view(bs, token_num, embed_dim)
+
+            elif layer == 'ffn':
+                query = self.ffns[ffn_index](
+                    query, identity if self.pre_norm else None)
+                ffn_index += 1
+
+        return query
+
+
+@TRANSFORMER_LAYER_SEQUENCE.register_module()
+class PlanDecoder(TransformerLayerSequence):
+    """Implements the decoder in DETR3D transformer.
+    Args:
+        return_intermediate (bool): Whether to return intermediate outputs.
+        coder_norm_cfg (dict): Config of last normalization layer. Default: `LN`.
+    """
+
+    def __init__(self, *args, return_intermediate=False, **kwargs):
+        super(PlanDecoder, self).__init__(*args, **kwargs)
+        self.return_intermediate = return_intermediate
+        self.fp16_enabled = False
+
+    def forward(self,
+                pose_queries,
+                bev_feats,
+                prev_pose=None,
+                bev_pos=None,
+                *args,
+                **kwargs):
+        """Forward function for `Detr3DTransformerDecoder`.
+        Args:
+            query (Tensor): Input query with shape
+                `(bs, num_query, embed_dims)`.
+        Returns:
+            Tensor: Results with shape [bs, num_query, embed_dims] when
+                return_intermediate is `False`, otherwise it has shape
+                [num_layers, bs, num_query, embed_dims].
+        """
+        output = pose_queries
+        intermediate = []
+
+        for lid, layer in enumerate(self.layers):
+            output = layer(
+                pose_queries,
+                bev_feats,
+                prev_pose=prev_pose,
+                bev_pos=bev_pos,
+                *args,
+                **kwargs)
+
+            pose_queries = output
+            if self.return_intermediate:
+                intermediate.append(output)
+
+        if self.return_intermediate:
+            return torch.stack(intermediate)
+
+        return output
+
+
+@TRANSFORMER_LAYER.register_module()
+class PlanTransformerLayer(MyCustomBaseTransformerLayer):
+    """Implements decoder layer in End-to-End future plan prediction network.
+    Args:
+        attn_cfgs (list[`mmcv.ConfigDict`] | list[dict] | dict )):
+            Configs for self_attention or cross_attention, the order
+            should be consistent with it in `operation_order`. If it is
+            a dict, it would be expand to the number of attention in
+            `operation_order`.
+        feedforward_channels (int): The hidden dimension for FFNs.
+        ffn_dropout (float): Probability of an element to be zeroed
+            in ffn. Default 0.0.
+        operation_order (tuple[str]): The execution order of operation
+            in transformer. Such as ('self_attn', 'norm', 'ffn', 'norm').
+            Default：None
+        act_cfg (dict): The activation config for FFNs. Default: `LN`
+        norm_cfg (dict): Config dict for normalization layer.
+            Default: `LN`.
+        ffn_num_fcs (int): The number of fully-connected layers in FFNs.
+            Default：2.
+    """
+
+    def __init__(self,
+                 attn_cfgs,
+                 feedforward_channels,
+                 ffn_dropout=0.0,
+                 operation_order=None,
+                 act_cfg=dict(type='ReLU', inplace=True),
+                 norm_cfg=dict(type='LN'),
+                 ffn_num_fcs=2,
+                 **kwargs):
+        super().__init__(
+            attn_cfgs=attn_cfgs,
+            feedforward_channels=feedforward_channels,
+            ffn_dropout=ffn_dropout,
+            operation_order=operation_order,
+            act_cfg=act_cfg,
+            norm_cfg=norm_cfg,
+            ffn_num_fcs=ffn_num_fcs,
+            **kwargs)
+        self.fp16_enabled = False
+
+    def forward(self,
+                pose_queries,
+                bev_feats,
+                prev_pose=None,
+                bev_pos=None,
+                *args,
+                **kwargs):
+        """Forward function for `TransformerDecoderLayer`.
+
+        **kwargs contains some specific arguments of attentions.
+
+        Args:
+            pose_queries (Tensor): The input query with shape
+                [bs, 1, dims]
+            bev_feats (Tensor): The key / value tensor in cross-attention
+                with shape [bs, bev_h * bev_w, dims]
+            prev_pose (Tensor): pose feats of the (previous)+current frame with shape
+                [bs, 2, dims]
+            bev_pos (Tensor): The positional encoding for bev_feats.
+                with shape [bs, bev_h * bev_w, dims]
+        Returns:
+            Tensor: forwarded results with shape [bs, 1, embed_dims].
+        """
+        norm_index = 0
+        attn_index = 0
+        ffn_index = 0
+
+        query=pose_queries
+        identity = query
+
+        for layer in self.operation_order:
+            # temporal self attention
+            if layer == 'self_attn':
+                query = self.attentions[attn_index](
+                    query,
+                    prev_pose,
+                    prev_pose,
+                    identity if self.pre_norm else None,
+                    **kwargs)
+                attn_index += 1
+                identity = query
+
+            elif layer == 'norm':
+                query = self.norms[norm_index](query)
+                norm_index += 1
+
+            # Spatial cross-attention for query features from current bev feats.
+            elif layer == 'cross_attn':
+                query = self.attentions[attn_index](
+                    query,
+                    bev_feats,
+                    bev_feats,
+                    identity if self.pre_norm else None,
+                    key_pos=bev_pos,
+                    **kwargs)
+                attn_index += 1
+                identity = query
 
             elif layer == 'ffn':
                 query = self.ffns[ffn_index](
