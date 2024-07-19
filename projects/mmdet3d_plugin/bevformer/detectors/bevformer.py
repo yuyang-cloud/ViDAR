@@ -155,43 +155,74 @@ class BEVFormer(MVXTwoStageDetector):
         else:
             return self.forward_test(**kwargs)
 
-    def _obtain_frozen_history_bev(self, imgs_queue, img_metas_list, drop_prev_index):
+    def _obtain_frozen_history_bev(self, imgs_queue, img_metas_list, drop_prev_index, command=None, rel_poses=None, gt_modes=None):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
+            imgs_queue = B,L,Ncams,C,H,W  -4,-3,-2三帧
         """
+        turn_on_plan = False    # history turn_off_plan
         is_training = self.training
         if is_training:
             self.eval()
 
         with torch.no_grad():
             prev_bev = None
+            prev_pose = None
             bs, len_queue, num_cams, C, H, W = imgs_queue.shape
             imgs_queue = imgs_queue.reshape(bs * len_queue, num_cams, C, H, W)
             img_metas = [meta[len_queue - 1] for meta in img_metas_list]
-            img_feats_list = self.extract_feat(
+            img_feats_list = self.extract_feat( # stages*[B,Lin,Ncams,C,H,W]
                 img=imgs_queue,
                 len_queue=len_queue,
                 img_metas=img_metas)
 
-            for i in range(len_queue):
+        prev_bev_list = []
+        for i in range(len_queue):
+            with torch.no_grad():
                 img_metas = [each[i] for each in img_metas_list]
                 if not img_metas[0]['prev_bev_exists']:
                     prev_bev = None
 
-                img_feats = [each_scale[:, i] for each_scale in img_feats_list]
+                img_feats = [each_scale[:, i] for each_scale in img_feats_list] # stages*[B,Ncams,C,H,W]  某一帧的feat
                 prev_bev = self.pts_bbox_head(
                     img_feats, img_metas, prev_bev, only_bev=True)
+                prev_bev_list.append(prev_bev)
+            
+            if turn_on_plan:
+                if is_training: 
+                    self.train()
+                    with torch.enable_grad():
+                        cur_can_bus = [each[0]['history_can_bus'][i+1] for each in img_metas_list] # bs,[18]  # history_can_bus: history+ref,18  初始帧为0,其余帧为delta_xyzangle
+                        prev_pose_pred, prev_pose = self.plan_head(prev_bev, prev_pose, cur_can_bus, command=command[:,i], rel_pose=rel_poses[:,i], gt_mode=gt_modes[:,i])
+                    self.eval()
+                else:
+                    with torch.no_grad():
+                        if i == len_queue - 1: # ref frame
+                            cur_can_bus, cur_rel_pose, cur_gt_mode = None, None, None
+                        else:                       # history frame
+                            cur_can_bus = [each[0]['history_can_bus'][i+1] for each in img_metas_list] # bs,[18]  # history_can_bus: history+ref,18  初始帧为0,其余帧为delta_xyzangle
+                            cur_rel_pose = rel_poses[:, i]
+                            cur_gt_mode = gt_modes[:, i]
+                        prev_pose_pred, prev_pose = self.plan_head(prev_bev, prev_pose, cur_can_bus, command=command[:,i], rel_pose=cur_rel_pose, gt_mode=cur_gt_mode)
 
-                if i < drop_prev_index:
-                    prev_bev = None
+            if i < drop_prev_index:
+                prev_bev = None
+                prev_pose = None
+
+        if len(prev_bev_list) > self.memory_queue_len - 1:
+            prev_bev_list = prev_bev_list[-(self.memory_queue_len-1):]
 
         if is_training:
             self.train()
-        return prev_bev
+        if turn_on_plan:
+            return prev_bev, prev_bev_list, prev_pose, prev_pose_pred
+        else:
+            return prev_bev, prev_bev_list
 
     def _obtain_backwarded_history_bev(
-            self, imgs_queue, prev_bev, backward_img_metas_list, backwarded_start_idx, backwarded_end_idx):
+            self, imgs_queue, prev_bev, prev_bev_list, backward_img_metas_list, backwarded_start_idx, backwarded_end_idx, command=None, prev_pose=None, rel_poses=None, gt_modes=None):
         """Obtain history BEV features iteratively, with gradients computed.
         """
+        turn_on_plan = False    # history turn_off_plan
         backward_prev_img = imgs_queue[:, backwarded_start_idx:backwarded_end_idx, ...]
         bs, len_queue, num_cams, C, H, W = backward_prev_img.shape
         backward_prev_img = backward_prev_img.reshape(bs * len_queue, num_cams, C, H, W)
@@ -212,24 +243,36 @@ class BEVFormer(MVXTwoStageDetector):
             img_feats = [each_scale[:, idx] for each_scale in backward_img_feats_list]
             prev_bev = self.pts_bbox_head(
                 img_feats, cur_backward_img_metas, prev_bev, only_bev=True)
-        return prev_bev
+            prev_bev_list.append(prev_bev)
+
+            if turn_on_plan:
+                cur_can_bus = [each[0]['can_bus'][prev_idx+1] for each in backward_img_metas_list]
+                prev_pose_pred, prev_pose = self.plan_head(prev_bev, prev_pose, cur_can_bus, command=command[:,prev_idx], rel_pose=rel_poses[:,prev_idx], gt_mode=gt_modes[:,prev_idx])
+
+        if len(prev_bev_list) > self.memory_queue_len - 1:
+            prev_bev_list = prev_bev_list[-(self.memory_queue_len-1):]
+
+        if turn_on_plan:
+            return prev_bev, prev_bev_list, prev_pose, prev_pose_pred
+        else:
+            return prev_bev, prev_bev_list
 
     def obtain_history_bev(self, img, img_metas, drop_prev_index=-1):
-        num_frames = img.shape[1]
-        backward_prev_frame_num = self.backwarded_prev_frame_num if self.training else 0
-        backward_prev_start_idx = num_frames - backward_prev_frame_num
-        backward_prev_end_idx = backward_prev_start_idx + backward_prev_frame_num
+        num_frames = img.shape[1]   # 只有history 没有当前帧
+        backward_prev_frame_num = self.backwarded_prev_frame_num if self.training else 0    # 1
+        backward_prev_start_idx = num_frames - backward_prev_frame_num                      # 4-1=3
+        backward_prev_end_idx = backward_prev_start_idx + backward_prev_frame_num           # 3+1=4
         # Frozen part.
-        prev_img = img[:, :backward_prev_start_idx, ...]
+        prev_img = img[:, :backward_prev_start_idx, ...]    # B,L,Ncams,C,H,W  -4,-3,-2三帧
         prev_img_metas = copy.deepcopy(img_metas)
         # prev_bev: bs, bev_h * bev_w, c
-        prev_bev = self._obtain_frozen_history_bev(prev_img, prev_img_metas, drop_prev_index=drop_prev_index)
+        prev_bev, prev_bev_list = self._obtain_frozen_history_bev(prev_img, prev_img_metas, drop_prev_index=drop_prev_index)
         # Backwarded part.
         if backward_prev_frame_num > 0:
-            prev_bev = self._obtain_backwarded_history_bev(
+            prev_bev, prev_bev_list = self._obtain_backwarded_history_bev(
                 img, prev_bev, copy.deepcopy(img_metas),
                 backward_prev_start_idx, backward_prev_end_idx)
-        return prev_bev
+        return prev_bev, prev_bev_list
 
     @auto_fp16(apply_to=('img', 'points'))
     def forward_train(self,
