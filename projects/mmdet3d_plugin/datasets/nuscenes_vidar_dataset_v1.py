@@ -249,7 +249,8 @@ class NuScenesViDARDatasetV1(NuScenesViDARDatasetTemplate):
         # occ flow
         ret_queue['occ_label_flag'] = occ_label_flag_list
         ret_queue['segmentation'] = segmentation_list
-        ret_queue['instance'] = instance_list
+        if 'instance' in queue[self.queue_length].keys():
+            ret_queue['instance'] = instance_list
         if self.turn_on_flow:
             ret_queue['flow'] = flow_list
 

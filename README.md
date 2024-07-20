@@ -154,8 +154,13 @@ GPU_NUM=8
 
 ./tools/dist_train.sh ${CONFIG} ${GPU_NUM}
 ```
+Configs:
 
-Train with planning包括两阶段：
+1) ```projects\configs\vidar_pretrain\nusc\action_condition.py``` : use Cam4DOcc dataset, only predict instances(Things) with inflated bbox occupancy.
+2) ```projects\configs\vidar_pretrain\nusc\action_condition_fine.py``` : use nuScenes-Occupancy dataset, predict both Things and Stuff with fine-grained occupancy.
+3) ```projects\configs\vidar_pretrain\nusc\plan_traj_fine.py``` : use nuScenes-Occupancy dataset, plan trajectories based on fine-grained occupancy predictions.
+
+Train with planning 包括两阶段：
 ```bash
 GPU_NUM=8
 
