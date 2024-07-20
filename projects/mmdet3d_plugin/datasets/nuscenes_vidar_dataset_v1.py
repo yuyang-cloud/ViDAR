@@ -117,6 +117,7 @@ class NuScenesViDARDatasetV1(NuScenesViDARDatasetTemplate):
                 segmentation_list = queue[self.queue_length]['gt_occ'].data     # history+ref+future, [H,W,D]
             else:
                 segmentation_list = queue[self.queue_length]['segmentation'].data   # history+ref+future, [H,W,D]
+                instance_list = queue[self.queue_length]['instance'].data if 'instance' in queue[self.queue_length].keys() else None
                 flow_list = queue[self.queue_length]['flow'].data if self.turn_on_flow else None
         else:                   # 非mem-efficient下加载所有帧的occ_label
             segmentation_list = [each['segmentation'].data for each in queue]   # N_in_prev+N_in_out*[N_prev+N_fur, H,W,D]
@@ -248,6 +249,7 @@ class NuScenesViDARDatasetV1(NuScenesViDARDatasetTemplate):
         # occ flow
         ret_queue['occ_label_flag'] = occ_label_flag_list
         ret_queue['segmentation'] = segmentation_list
+        ret_queue['instance'] = instance_list
         if self.turn_on_flow:
             ret_queue['flow'] = flow_list
 

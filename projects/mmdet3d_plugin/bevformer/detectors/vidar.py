@@ -1076,6 +1076,10 @@ class ViDAR(BEVFormer):
         else:
             flow_3D = None
             occ_3D = None
+        if self.turn_on_flow and self.future_pred_head_flow.obj_motion_norm:
+            occ_3D = torch.argmax(next_bev_preds, dim=-1)[:,:,0].detach()    # L,inter,B,hw,d
+        else:
+            occ_3D = None
         # sem_occupancy
         if self.turn_on_plan:
             sem_occupancy = torch.argmax(next_bev_preds, dim=-1)[:,-1,0].transpose(0,1).detach()   # B,Lout,hw,d
