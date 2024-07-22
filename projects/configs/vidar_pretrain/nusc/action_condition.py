@@ -41,7 +41,7 @@ mem_efficient = True         # only load ref_frame's occ_data
 supervise_all_future = True  # select which future to predict occ (defalut=True, when mem_efficient=True, all future generate occ) (when mem-efficient=False, 可以为False选取部分帧计算loss从而save gpu)
 load_frame_interval = None  # use 1/8 nuscenes dataset for faster evaluation.
 
-turn_on_flow = False         # turn_on_flow=True: load flow_label and predict flow througn flow_branch
+turn_on_flow = True         # turn_on_flow=True: load flow_label and predict flow througn flow_branch
 turn_on_plan = False
 
 # ViDAR model.
@@ -136,6 +136,7 @@ model = dict(
         memory_queue_len=memory_queue_len,
         soft_weight=False,
         turn_on_flow=False, # Occ Head
+        obj_motion_norm=False,
         pred_history_frame_num=vidar_head_pred_history_frame_num,
         pred_future_frame_num=vidar_head_pred_future_frame_num,
         per_frame_loss_weight=vidar_head_per_frame_loss_weight,

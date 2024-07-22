@@ -111,6 +111,8 @@ class ViDARHeadTemplate(BaseModule):
                  condition_ca_add='add',
                  use_command=False,
                  use_vel_steering=False,
+                 use_vel=False,
+                 use_steering=False,
 
                  # target BEV configurations.
                  bev_h=30,
@@ -155,6 +157,16 @@ class ViDARHeadTemplate(BaseModule):
         self.vel_steering_dims = 4        # (vx, vy, v_yaw, steering)
         if self.use_vel_steering:
             self.fourier_embed_velsteering = Fourier_Embed(self.vel_steering_dims, self.fourier_nhidden)
+        # vel
+        self.use_vel = use_vel
+        self.vel_dims = 3        # (vx, vy, v_yaw)
+        if self.use_vel:
+            self.fourier_embed_vel = Fourier_Embed(self.vel_dims, self.fourier_nhidden)
+        # steering
+        self.use_steering = use_steering
+        self.steering_dims = 1        # (vx, vy, v_yaw, steering)
+        if self.use_steering:
+            self.fourier_embed_steering = Fourier_Embed(self.steering_dims, self.fourier_nhidden)
         # command
         self.use_command = use_command
         self.command_dims = 1             # command
@@ -166,7 +178,7 @@ class ViDARHeadTemplate(BaseModule):
         if self.use_plan_traj:
             self.fourier_embed_plantraj = Fourier_Embed(self.plan_traj_dims, self.fourier_nhidden)
         # action_condition
-        self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_command + 256 * use_plan_traj
+        self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_vel + 256 * use_steering + 256 * use_command + 256 * use_plan_traj
         self.condition_ca_add = condition_ca_add
 
         # Network configurations.
@@ -247,11 +259,11 @@ class ViDARHeadTemplate(BaseModule):
         self.prev_frame_embedding = nn.Parameter(torch.Tensor(self.memory_queue_len, self.embed_dims))
         # Embeds for CanBus information.
         # Use position & orientation information of next frame's canbus.
-        if (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj) and self.condition_ca_add == 'add':
+        if (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj) and self.condition_ca_add == 'add':
             can_bus_input_dim = self.action_condition_dims
-        elif (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj) and self.condition_ca_add == 'ca':
+        elif (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj) and self.condition_ca_add == 'ca':
             can_bus_input_dim = self.action_condition_dims
-        if self.use_can_bus or self.use_command or self.use_vel_steering or self.use_plan_traj:
+        if self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj:
             self.fusion_mlp = nn.Sequential(
                 nn.Linear(can_bus_input_dim, self.embed_dims),
                 nn.ReLU(inplace=True),
@@ -328,7 +340,7 @@ class ViDARHeadTemplate(BaseModule):
         # 1. obtain flow prediction.
         flow_pred = self.flow_raymarching_branch(next_bev_feats)  # inter_num*B, H,W, D*3
         flow_pred = flow_pred.view(*flow_pred.shape[:-1], self.num_pred_height, self.num_classes) # inter*B,H,W,D,3
-        flow_label = flow_pred.detach() * (occ_3D > 0).float().unsqueeze(-1)    # inter*B,H,W,D,3
+        flow_label = flow_pred.detach() * (occ_3D.detach() > 0).float().unsqueeze(-1)    # inter*B,H,W,D,3
         # breakpoint()
         # import matplotlib.pyplot as plt
         # plt.imshow(flow_label[0].mean(2)[...,1].detach().cpu().numpy())
@@ -423,6 +435,28 @@ class ViDARHeadTemplate(BaseModule):
             else:
                 action_condition = torch.cat([action_condition, vel_steering], dim=-1)
         
+        if self.use_vel:
+            # vel_steering: bs,4  (vx, vy, v_yaw, steering)
+            vel = vel_steering[:, :self.vel_dims]
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                vel = self.fourier_embed_vel(vel)
+            if action_condition is None:
+                action_condition = vel
+            else:
+                action_condition = torch.cat([action_condition, vel], dim=-1)
+        
+        if self.use_steering:
+            # vel_steering: bs,4  (vx, vy, v_yaw, steering)
+            steering = vel_steering[:, -1:]
+            # fourier embed
+            if self.condition_ca_add == 'ca':
+                steering = self.fourier_embed_steering(steering)
+            if action_condition is None:
+                action_condition = steering
+            else:
+                action_condition = torch.cat([action_condition, steering], dim=-1)
+        
         if action_condition is not None:
             action_condition = self.fusion_mlp(action_condition)
 
@@ -439,8 +473,9 @@ class ViDARHeadTemplate(BaseModule):
                                                 bev_sem_gts, flow_3D, occ_3D, future2history)
             prev_features = render_dict['bev_embed']
             bev_occ_pred = render_dict['bev_occ_pred']  # B,D,H,W
-            bev_sem_pred = render_dict['bev_sem_pred']  # B,cls,H,W
             san_saw_output = render_dict['san_saw_output']
+            if not self.turn_on_flow:
+                bev_sem_pred = render_dict['bev_sem_pred']  # B,cls,H,W
 
         frame_embedding = self.prev_frame_embedding
         prev_features_input = (prev_features +
@@ -464,7 +499,10 @@ class ViDARHeadTemplate(BaseModule):
             next_bev_feat, bev_sem_pred = self.forward_sem_norm(next_bev_feat)
         # 4. obj_motion_norm
         if self.obj_motion_norm and self.turn_on_flow:
-            next_bev_feat, bev_sem_pred = self.forward_obj_motion_norm(next_bev_feat, occ_3D)
+            next_bev_feat_norm, bev_sem_pred = self.forward_obj_motion_norm(next_bev_feat.clone(), occ_3D)
+            next_bev_feat = next_bev_feat_norm
+        elif self.turn_on_flow:
+            bev_sem_pred = None
 
         return next_bev_feat, bev_occ_pred, bev_sem_pred, san_saw_output
 

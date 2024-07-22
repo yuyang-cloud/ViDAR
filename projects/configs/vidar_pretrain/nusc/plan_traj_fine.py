@@ -142,6 +142,7 @@ model = dict(
         memory_queue_len=memory_queue_len,
         soft_weight=False,
         turn_on_flow=False, # Occ Head
+        obj_motion_norm=False,
         pred_history_frame_num=vidar_head_pred_history_frame_num,
         pred_future_frame_num=vidar_head_pred_future_frame_num,
         per_frame_loss_weight=vidar_head_per_frame_loss_weight,

@@ -87,7 +87,10 @@ class ViDAR(BEVFormer):
             future_pred_head_flow['turn_on_flow'] = True
             future_pred_head_flow['prev_render_neck']['occ_flow'] = 'flow'
             self.future_pred_head_flow = builder.build_head(future_pred_head_flow)
-            self.vehicles_id = [1,2,3,4,5,6,7,8]
+            if self.future_pred_head.num_classes == 9:
+                self.vehicles_id = [1,2,3,4,5,6,7,8]
+            elif self.future_pred_head.num_classes == 17:
+                self.vehicles_id = [2,3,4,5,6,7,9.10]
             self.gmo_id = 1 # sem_clsses -> GMO
             self.iou_thresh_for_vpq = 0.2
         
