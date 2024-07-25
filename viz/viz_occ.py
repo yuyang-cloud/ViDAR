@@ -186,7 +186,7 @@ def create_arrow(traj, radius=0.05, color=[1, 0, 0]):
 
 
 def show_point_cloud(points: np.ndarray, colors=True, points_colors=None, bbox3d=None, voxelize=False,
-                     bbox_corners=None, linesets=None, vis=None, offset=[0,0,0], large_voxel=True, voxel_size=0.4, traj=None,):
+                     bbox_corners=None, linesets=None, vis=None, offset=[0,0,0], large_voxel=True, voxel_size=0.4, traj=None, draw_gt=False,):
     """
     :param points: (N, 3)  3:(x, y, z)
     :param colors: false 不显示点云颜色
@@ -227,6 +227,8 @@ def show_point_cloud(points: np.ndarray, colors=True, points_colors=None, bbox3d
 
     ego_pcd = o3d.geometry.PointCloud()
     ego_points = generate_the_ego_car()
+    if draw_gt:
+        ego_points[:, [0,1]] = ego_points[:, [1,0]]
     ego_pcd.points = o3d.utility.Vector3dVector(ego_points)
     ego_pcd_colors = np.ones_like(ego_points) * [0., 0.5, 1.0]
     ego_pcd.colors = o3d.utility.Vector3dVector(ego_pcd_colors)
@@ -236,8 +238,9 @@ def show_point_cloud(points: np.ndarray, colors=True, points_colors=None, bbox3d
         traj_height = np.ones(traj.shape[0]) * ego_points[:, -1].max()
         traj = np.concatenate([traj, traj_height[:, None]], axis=-1)
         traj[:, [0, 1]] = traj[:, [1, 0]]
-        traj[:, 0] += ego_points[:, 0].max()
-        traj = np.concatenate([np.array([ego_points[:,0].max(), 0., ego_points[:,-1].max()])[None,:], traj], axis=0)
+        if not draw_gt:
+            traj[:, 0] += ego_points[:, 0].max()
+            traj = np.concatenate([np.array([ego_points[:,0].max(), 0., ego_points[:,-1].max()])[None,:], traj], axis=0)
         # # double y_axit to visulize more clear
         # traj_diff = traj[1:] - traj[:-1]
         # traj[1:] += traj_diff
@@ -254,7 +257,7 @@ def show_point_cloud(points: np.ndarray, colors=True, points_colors=None, bbox3d
     return vis
 
 
-def show_occ(occ_state, occ_show, voxel_size, vis=None, offset=[0, 0, 0], traj=None):
+def show_occ(occ_state, occ_show, voxel_size, vis=None, offset=[0, 0, 0], traj=None, draw_gt=False):
     """
     Args:
         occ_state: (Dx, Dy, Dz), cls_id
@@ -268,7 +271,8 @@ def show_occ(occ_state, occ_show, voxel_size, vis=None, offset=[0, 0, 0], traj=N
     """
     colors = colormap_to_colors / 255
     pcd, labels = voxel2points(occ_state, occ_show, voxel_size)
-    pcd[:, 1] = -pcd[:, 1]
+    if not draw_gt:
+        pcd[:, 1] = -pcd[:, 1]
     # pcd: (N, 3)  3: (x, y, z)
     # labels: (N, )  cls_id
     _labels = labels % len(colors)
@@ -296,6 +300,7 @@ def show_occ(occ_state, occ_show, voxel_size, vis=None, offset=[0, 0, 0], traj=N
         large_voxel=True,
         voxel_size=0.4,
         traj=traj,
+        draw_gt=draw_gt,
     )
     return vis
 
@@ -318,6 +323,18 @@ def generate_the_ego_car():
     ego_dict = {}
     ego_dict['point'] = ego_point_xyz
     ego_dict['label'] = ego_points_label
+
+#    # rotate ego-car yaw
+#     yaw_angle = 15
+#     yaw_rad = np.radians(yaw_angle)
+#     # Create the yaw rotation matrix
+#     rotation_matrix = np.array([
+#         [np.cos(yaw_rad), -np.sin(yaw_rad), 0],
+#         [np.sin(yaw_rad),  np.cos(yaw_rad), 0],
+#         [0,               0,               1]
+#     ])
+#     # Apply the rotation to the points
+#     ego_point_xyz = np.dot(ego_point_xyz, rotation_matrix.T)
     return ego_point_xyz
 
 
@@ -341,6 +358,10 @@ def parse_args():
         '--show_traj',
         action='store_true',
         help='whether not to visulize trajctories')
+    parser.add_argument(
+        '--draw_gt',
+        action='store_true',
+        help='whether not to visulize gt')
     parser.add_argument(
         '--vis-frames',
         type=int,
@@ -487,20 +508,24 @@ def main():
 
         # occ_canvas
         voxel_size = VOXEL_SIZE
-        pred_occ = pred_occ_semantic_to_draw
-        voxel_show = pred_occ[pred_occ[:, -1] != FREE_LABEL][:, :3]
-        vis = show_occ(torch.from_numpy(pred_occ), torch.from_numpy(voxel_show), voxel_size=voxel_size, vis=vis,
-                       offset=[0, pred_occ.shape[0] * voxel_size[0] * 1.2 * 0, 0], traj=pred_traj)
-
         if args.draw_gt:
-            voxel_label = gt_occ_semantic_refine
+            voxel_label = gt_occ_semantic_refine.astype(np.float64)
             voxel_show = voxel_label[voxel_label[:, -1] != FREE_LABEL][:, :3]
+            if pred_traj is not None:
+                pred_traj[:, [0,1]] = pred_traj[:, [1,0]]
             vis = show_occ(torch.from_numpy(voxel_label), torch.from_numpy(voxel_show), voxel_size=voxel_size, vis=vis,
-                            offset=[0, voxel_label.shape[0] * voxel_size[0] * 1.2 * 1, 0])
+                            offset=[0, voxel_label.shape[0] * voxel_size[0] * 1.2 * 0, 0], traj=pred_traj, draw_gt=True)
+
+        elif not args.draw_gt:
+            pred_occ = pred_occ_semantic_to_draw
+            voxel_show = pred_occ[pred_occ[:, -1] != FREE_LABEL][:, :3]
+            vis = show_occ(torch.from_numpy(pred_occ), torch.from_numpy(voxel_show), voxel_size=voxel_size, vis=vis,
+                        offset=[0, pred_occ.shape[0] * voxel_size[0] * 1.2 * 0, 0], traj=pred_traj, draw_gt=False)
 
         # 加载viewpoint.json
+        viewpoint = './viz/viewpoint_gt.json' if args.draw_gt else './viz/viewpoint.json'
         ctr = vis.get_view_control()
-        param = o3d.io.read_pinhole_camera_parameters('./viz/viewpoint.json')
+        param = o3d.io.read_pinhole_camera_parameters(viewpoint)
         ctr.convert_from_pinhole_camera_parameters(param)
 
         vis.poll_events()
@@ -508,8 +533,9 @@ def main():
         vis.run()
 
         # # 保留viewpoint.json
+        # viewpoint = './viz/viewpoint_gt.json' if args.draw_gt else './viz/viewpoint.json'
         # param = vis.get_view_control().convert_to_pinhole_camera_parameters()
-        # o3d.io.write_pinhole_camera_parameters('./viz/viewpoint.json', param)
+        # o3d.io.write_pinhole_camera_parameters(viewpoint, param)
         # vis.destroy_window()
         # breakpoint()
 
