@@ -161,6 +161,8 @@ model = dict(
         use_plan_traj=True, # use future pred traj      4D-Occ-Pred: must use_plan_traj=True
         use_command=False,
         use_vel_steering=False,
+        use_vel=False,
+        use_steering=False,
         condition_ca_add='ca',
         can_bus_norm=True,
         can_bus_dims=(0, 1, 2, 17),
@@ -186,7 +188,7 @@ model = dict(
             embed_dims=_dim_, 
             occ_render=False,
             sem_render=False,
-            sem_norm=False,
+            sem_norm=True,
             sem_gt_train=False,
             ego_motion_ln=False,
             obj_motion_ln=False,

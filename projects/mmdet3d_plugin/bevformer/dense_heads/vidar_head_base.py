@@ -159,7 +159,7 @@ class ViDARHeadTemplate(BaseModule):
             self.fourier_embed_velsteering = Fourier_Embed(self.vel_steering_dims, self.fourier_nhidden)
         # vel
         self.use_vel = use_vel
-        self.vel_dims = 3        # (vx, vy, v_yaw)
+        self.vel_dims = 2        # (vx, vy, v_yaw)
         if self.use_vel:
             self.fourier_embed_vel = Fourier_Embed(self.vel_dims, self.fourier_nhidden)
         # steering
