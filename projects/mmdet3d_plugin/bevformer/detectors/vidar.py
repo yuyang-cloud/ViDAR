@@ -857,7 +857,7 @@ class ViDAR(BEVFormer):
             prev_bev_list = torch.stack(prev_bev_list, dim=1)
             prev_bev_list = torch.cat([prev_bev_list, ref_bev.unsqueeze(1)], dim=1)[:, -self.memory_queue_len:, ...]    # B,F,HW,C
             # bev_sem_gts
-            if self.future_pred_head.prev_render_neck.sem_norm and self.training_epoch < 12:
+            if self.future_pred_head.prev_render_neck.sem_norm and self.future_pred_head.prev_render_neck.sem_gt_train and self.training_epoch < 12:
                 occ_gts = segmentation[0][self.future_pred_head.history_queue_length+1-self.memory_queue_len:-1]  # select_frame,H,W,D
                 bev_sem_gts, _ = torch.max(occ_gts, dim=-1) # select_frame, H,W
                 bev_sem_gts = F.interpolate(bev_sem_gts.unsqueeze(1), size=(self.bev_h, self.bev_w), mode='nearest').transpose(0,1) # bs, select_frame,H,W
