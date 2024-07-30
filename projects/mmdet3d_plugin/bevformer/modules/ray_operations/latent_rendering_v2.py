@@ -178,16 +178,20 @@ class LatentRenderingV2(BaseModule):
             self.sem_raymarching_branch = nn.Sequential(*sem_raymarching_branch)
             self.num_cls = num_cls
 
-            self.param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
+            self.sem_param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
 
             nhidden = 128
-            self.mlp_shared = nn.Sequential(
+            self.sem_mlp_shared = nn.Sequential(
                 nn.Conv2d(self.num_cls, nhidden, kernel_size=3, padding=1),
                 nn.ReLU()
             )
-            self.mlp_gamma = nn.Conv2d(nhidden, self.embed_dims, kernel_size=3, padding=1)
-            self.mlp_beta = nn.Conv2d(nhidden, self.embed_dims, kernel_size=3, padding=1)
-            self.reset_parameters()
+            self.sem_mlp_gamma = nn.Conv2d(nhidden, self.embed_dims, kernel_size=3, padding=1)
+            self.sem_mlp_beta = nn.Conv2d(nhidden, self.embed_dims, kernel_size=3, padding=1)
+            # self.reset_parameters()
+            nn.init.zeros_(self.sem_mlp_gamma.weight)
+            nn.init.zeros_(self.sem_mlp_beta.weight)
+            nn.init.ones_(self.sem_mlp_gamma.bias)
+            nn.init.zeros_(self.sem_mlp_beta.bias)
         
         if self.san_saw and self.occ_flow == 'occ':
             self.num_cls = num_cls
@@ -198,16 +202,20 @@ class LatentRenderingV2(BaseModule):
             # self.saw_stage = SAW(dim=self.embed_dims, selected_classes=self.selecte_classes, relax_denom=2.0, classifier=self.classifier)
         
         if self.ego_motion_ln:
-            self.param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
+            self.ego_param_free_norm = nn.LayerNorm(self.embed_dims, elementwise_affine=False)
 
             nhidden = 256
-            self.mlp_shared = nn.Sequential(
+            self.ego_mlp_shared = nn.Sequential(
                 nn.Linear(144, nhidden),
                 nn.ReLU(),
             )
-            self.mlp_gamma = nn.Linear(nhidden, nhidden)
-            self.mlp_beta = nn.Linear(nhidden, nhidden)
-            self.reset_parameters()
+            self.ego_mlp_gamma = nn.Linear(nhidden, nhidden)
+            self.ego_mlp_beta = nn.Linear(nhidden, nhidden)
+            # self.reset_parameters()
+            nn.init.zeros_(self.ego_mlp_gamma.weight)
+            nn.init.zeros_(self.ego_mlp_beta.weight)
+            nn.init.ones_(self.ego_mlp_gamma.bias)
+            nn.init.zeros_(self.ego_mlp_beta.bias)
         
         if self.obj_motion_ln and self.occ_flow=='flow':
             self.fourier_embed = Fourier_Embed(32)
@@ -430,7 +438,7 @@ class LatentRenderingV2(BaseModule):
         sem_code = F.one_hot(sem_label.long(), num_classes=self.num_cls).float().permute(0,3,1,2).contiguous()
 
         # 2. generate parameter-free normalized activations
-        embed = self.param_free_norm(embed)
+        embed = self.sem_param_free_norm(embed)
         embed = embed.permute(0,3,1,2)
         # breakpoint()
         # import matplotlib.pyplot as plt
@@ -439,9 +447,9 @@ class LatentRenderingV2(BaseModule):
         # breakpoint()
 
         # 3. produce scaling and bias conditioned on semantic map
-        actv = self.mlp_shared(sem_code)
-        gamma = self.mlp_gamma(actv)
-        beta = self.mlp_beta(actv)
+        actv = self.sem_mlp_shared(sem_code)
+        gamma = self.sem_mlp_gamma(actv)
+        beta = self.sem_mlp_beta(actv)
 
         # apply scale and bias
         embed = gamma * embed + beta
@@ -508,12 +516,12 @@ class LatentRenderingV2(BaseModule):
         memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
 
         # 2. generate parameter-free normalized activations
-        embed = self.param_free_norm(embed)
+        embed = self.ego_param_free_norm(embed)
 
         # 3. produce scaling and bias conditioned on semantic map
-        actv = self.mlp_shared(memory_ego_motion)   # B,C
-        gamma = self.mlp_gamma(actv)
-        beta = self.mlp_beta(actv)
+        actv = self.ego_mlp_shared(memory_ego_motion)   # B,C
+        gamma = self.ego_mlp_gamma(actv)
+        beta = self.ego_mlp_beta(actv)
 
         # apply scale and bias
         embed = gamma * embed + beta
@@ -609,16 +617,16 @@ class LatentRenderingV2(BaseModule):
             sem_embeds, san_saw_output = self.forward_san_saw(embeds)
             sem_embeds = sem_embeds.view(bs, num_frames, bev_h, bev_w, embed_dim)
 
-        if self.occ_render and self.sem_render and self.occ_flow=='occ':
-            embeds = occ_embeds + sem_embeds
-        elif self.occ_render and self.occ_flow=='occ':
-            embeds = occ_embeds
-        elif self.sem_render and self.occ_flow=='occ':
-            embeds = sem_embeds
-        elif self.sem_norm and self.occ_flow=='occ':
-            embeds = sem_embeds
-        elif self.san_saw and self.occ_flow=='occ':
-            embeds = sem_embeds
+        # if self.occ_render and self.sem_render and self.occ_flow=='occ':
+        #     embeds = occ_embeds + sem_embeds
+        # elif self.occ_render and self.occ_flow=='occ':
+        #     embeds = occ_embeds
+        # elif self.sem_render and self.occ_flow=='occ':
+        #     embeds = sem_embeds
+        # elif self.sem_norm and self.occ_flow=='occ':
+        #     embeds = sem_embeds
+        # elif self.san_saw and self.occ_flow=='occ':
+        #     embeds = sem_embeds
 
 
         if self.ego_motion_ln and future2history is not None:
@@ -635,12 +643,20 @@ class LatentRenderingV2(BaseModule):
                 obj_motion_embeds.append(motion_embed)
             obj_motion_embeds = torch.stack(obj_motion_embeds, dim=1)
 
-        if (self.ego_motion_ln and future2history is not None) and (self.obj_motion_ln and flow_3D is not None):
-            embeds = ego_motion_embeds + obj_motion_embeds
+
+        if self.sem_norm and self.occ_flow=='occ' and self.ego_motion_ln and future2history is not None:
+            embeds = sem_embeds + ego_motion_embeds
+        elif self.sem_norm and self.occ_flow=='occ':
+            embeds = sem_embeds
         elif self.ego_motion_ln and future2history is not None:
             embeds = ego_motion_embeds
-        elif self.obj_motion_ln and flow_3D is not None: 
-            embeds = obj_motion_embeds
+
+        # if (self.ego_motion_ln and future2history is not None) and (self.obj_motion_ln and flow_3D is not None):
+        #     embeds = ego_motion_embeds + obj_motion_embeds
+        # elif self.ego_motion_ln and future2history is not None:
+        #     embeds = ego_motion_embeds
+        # elif self.obj_motion_ln and flow_3D is not None: 
+        #     embeds = obj_motion_embeds
 
         embeds = embeds.transpose(2, 3).contiguous() # NOTE: query first_H, then_W
         out_dict = {
