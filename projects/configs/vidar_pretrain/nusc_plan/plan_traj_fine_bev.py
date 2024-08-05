@@ -21,13 +21,13 @@ plan_grid_conf = {
 }
 
 # Dataloader.
-queue_length = 2 # history frame num input  (不包含ref)
+queue_length = 4 # history frame num input  (不包含ref)
 memory_queue_len = 1 # memory queue
 
-future_queue_length_train = 4 # future frame num input
-future_pred_frame_num_train = 4 # future frame num pred training
-future_queue_length_test = 4   # future frame num input
-future_pred_frame_num_test = 4 # future frame num pred testing
+future_queue_length_train = 6 # future frame num input
+future_pred_frame_num_train = 6 # future frame num pred training
+future_queue_length_test = 6   # future frame num input
+future_pred_frame_num_test = 6 # future frame num pred testing
 
 plan_decoder_layer_num = 1
 future_decoder_layer_num = 3
