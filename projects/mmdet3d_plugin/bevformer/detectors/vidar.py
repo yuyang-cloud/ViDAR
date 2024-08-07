@@ -100,7 +100,7 @@ class ViDAR(BEVFormer):
             self.plan_head = builder.build_head(plan_head)
             self.plan_head_type = plan_head.type
             self.planning_metric = None
-            self.planning_metric_v2 = PlanningMetric_v2(n_future=3)
+            self.planning_metric_v2 = PlanningMetric_v2(n_future=future_pred_frame_num+1)
         
         # memory queue
         self.memory_queue_len = memory_queue_len
