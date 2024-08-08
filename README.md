@@ -14,7 +14,7 @@ conda install -c omgarcia gcc-6 # (optional) Make sure the GCC version compatibl
 
 Install some other required packges and Detectron2.
 ```bash
-pip install setuptools einops fvcore seaborn ninja iopath==0.1.9 timm==0.6.13  typing-extensions==4.5.0 pylint ipython==8.12  numpy==1.19.5 matplotlib==3.5.2 numba==0.48.0 pandas==1.4.4 scikit-image==0.19.3 casadi==3.5.5 pytorch-lightning==1.2.5 lyft_dataset_sdk nuscenes-devkit plyfile networkx==2.2
+pip install setuptools einops fvcore seaborn ninja iopath==0.1.9 timm==0.6.13  typing-extensions==4.5.0 pylint ipython==8.12  numpy==1.19.5 matplotlib==3.5.2 numba==0.48.0 pandas==1.4.4 scikit-image==0.19.3 casadi==3.5.5 pytorch-lightning==1.2.5 lyft_dataset_sdk nuscenes-devkit plyfile networkx==2.2 trimesh==2.35.39 yapf==0.40.1
 
 # Detectron2
 python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
