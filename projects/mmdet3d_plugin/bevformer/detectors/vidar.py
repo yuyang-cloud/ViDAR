@@ -90,7 +90,7 @@ class ViDAR(BEVFormer):
             if self.future_pred_head.num_classes == 9:
                 self.vehicles_id = [1,2,3,4,5,6,7,8]
             elif self.future_pred_head.num_classes == 17:
-                self.vehicles_id = [2,3,4,5,6,7,9.10]
+                self.vehicles_id = [2,3,4,5,6,7,9,10]
             self.gmo_id = 1 # sem_clsses -> GMO
             self.iou_thresh_for_vpq = 0.2
         
@@ -355,11 +355,15 @@ class ViDAR(BEVFormer):
         ref_bev = self.pts_bbox_head(img_feats, img_metas, prev_bev, only_bev=True)
 
         # C3. PlanHead 
-        if ref_sem_occupancy is None:
-            ref_sem_occupancy = self.future_pred_head.forward_head(ref_bev.unsqueeze(0).unsqueeze(0))[-1, -1, 0].argmax(-1).detach()
-            bs, hw, d = ref_sem_occupancy.shape
-            ref_sem_occupancy = ref_sem_occupancy.view(bs, self.bev_w, self.bev_h, d).transpose(1,2)
-        ref_pose_pred, ref_pose_loss = self.plan_head(ref_bev, ref_sample_traj, ref_sem_occupancy, ref_command, ref_real_traj)
+        if 'v3' in self.plan_head_type:
+            if ref_sem_occupancy is None:
+                ref_sem_occupancy = self.future_pred_head.forward_head(ref_bev.unsqueeze(0).unsqueeze(0))[-1, -1, 0].argmax(-1).detach()
+                bs, hw, d = ref_sem_occupancy.shape
+                ref_sem_occupancy = ref_sem_occupancy.view(bs, self.bev_w, self.bev_h, d).transpose(1,2)
+            ref_pose_pred, ref_pose_loss = self.plan_head(ref_bev, ref_sample_traj, ref_sem_occupancy, ref_command, ref_real_traj)
+        elif 'v4' in self.plan_head_type:
+            ref_pose_pred = self.plan_head(ref_bev, ref_command)
+            ref_pose_loss = None
         return ref_bev, ref_pose_pred, ref_pose_loss
 
     
@@ -451,16 +455,21 @@ class ViDAR(BEVFormer):
             
             # PlanHead 
             if self.turn_on_plan:
-                if sem_occupancy is None:   # use_pred
-                    sem_occupancy_i = future_pred_head.forward_head(pred_feat.unsqueeze(0))[-1, -1, 0].argmax(-1).detach()
-                    bs, hw, d = sem_occupancy_i.shape
-                    sem_occupancy_i = sem_occupancy_i.view(bs, self.bev_w, self.bev_h, d).transpose(1,2)
-                else:   # use_gt  traning_epoch < 12
-                    sem_occupancy_i = sem_occupancy[:,future_frame_index]
-                pose_pred, pose_loss = self.plan_head(pred_feat[-1], sample_traj[:,:,future_frame_index], sem_occupancy_i, command[:, future_frame_index], sdc_planning[:, future_frame_index])
-                # update prev_pose and store pred
-                next_pose_preds = torch.cat([next_pose_preds, pose_pred], dim=1)    # bs,Lout,3
-                next_pose_loss.append(pose_loss)
+                if 'v3' in self.plan_head_type:
+                    if sem_occupancy is None:   # use_pred
+                        sem_occupancy_i = future_pred_head.forward_head(pred_feat.unsqueeze(0))[-1, -1, 0].argmax(-1).detach()
+                        bs, hw, d = sem_occupancy_i.shape
+                        sem_occupancy_i = sem_occupancy_i.view(bs, self.bev_w, self.bev_h, d).transpose(1,2)
+                    else:   # use_gt  traning_epoch < 12
+                        sem_occupancy_i = sem_occupancy[:,future_frame_index]
+                    pose_pred, pose_loss = self.plan_head(pred_feat[-1], sample_traj[:,:,future_frame_index], sem_occupancy_i, command[:, future_frame_index], sdc_planning[:, future_frame_index])
+                    # update prev_pose and store pred
+                    next_pose_preds = torch.cat([next_pose_preds, pose_pred], dim=1)    # bs,Lout,3
+                    next_pose_loss.append(pose_loss)
+                elif 'v4' in self.plan_head_type:
+                    pose_pred = self.plan_head(pred_feat[-1], command[:, future_frame_index])
+                    # update prev_pose and store pred
+                    next_pose_preds = torch.cat([next_pose_preds, pose_pred], dim=1)    # bs,Lout,3
 
 
             # 3. update pred_feat to prev_bev_input and update ref_to_history_list.
@@ -947,6 +956,9 @@ class ViDAR(BEVFormer):
                 losses_plan = self.compute_plan_loss(next_pose_preds, sdc_planning, sdc_planning_mask, gt_future_boxes, img_metas)
                 losses_plan_cost = ref_pose_loss + sum(next_pose_loss)
                 losses_plan.update(losses_plan_cost = 0.1 * losses_plan_cost)
+            elif 'v4' in self.plan_head_type:
+                gt_future_boxes = gt_future_boxes[0]   # Lout,[boxes]  NOTE: Current Support bs=1
+                losses_plan = self.compute_plan_loss(next_pose_preds, sdc_planning, sdc_planning_mask, gt_future_boxes, img_metas)
             losses.update(losses_plan)
         # E4. Compute loss for bev rendering
         if self.future_pred_head.prev_render_neck.occ_render or self.future_pred_head.prev_render_neck.sem_render or self.future_pred_head.prev_render_neck.sem_norm:

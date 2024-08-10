@@ -812,3 +812,164 @@ class PlanHead_v3(BaseModule):
         # 6. plan regression
         next_pose = self.reg_branch(plan_query).view((-1, self.planning_steps, 2))   # B,mode=1,2
         return next_pose, loss
+
+@HEADS.register_module()
+class PlanHead_v4(BaseModule):
+    """Head of Ego-Trajectory Planning.
+    """
+
+    def __init__(self,
+                 # Architecture.
+                 with_adapter=True,
+                 transformer=None,
+                 plan_grid_conf=None,
+
+                 # positional encoding
+                 bev_h=200,
+                 bev_w=200,
+                 positional_encoding=dict(
+                     type='SinePositionalEncoding',
+                     num_feats=128,
+                     normalize=True),
+
+                 # loss
+                 loss_planning=None,
+                 loss_collision=None,
+
+                 *args,
+                 **kwargs):
+
+        # BEV configuration of reference frame.
+        super().__init__(**kwargs)
+        bevformer_bev_conf = {
+            'xbound': [-51.2, 51.2, 0.512],
+            'ybound': [-51.2, 51.2, 0.512],
+            'zbound': [-10.0, 10.0, 20.0],
+        }
+        self.bev_sampler =  BevFeatureSlicer(bevformer_bev_conf, plan_grid_conf)
+
+        # TODO: reimplement it with down-scaled feature_map
+        self.embed_dims = transformer.embed_dims
+        self.with_adapter = with_adapter
+        if with_adapter:
+            bev_adapter_block = nn.Sequential(
+                nn.Conv2d(self.embed_dims, self.embed_dims // 2, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(self.embed_dims // 2, self.embed_dims, kernel_size=1),
+            )
+            N_Blocks = 3
+            bev_adapter = [copy.deepcopy(bev_adapter_block) for _ in range(N_Blocks)]
+            self.bev_adapter = nn.Sequential(*bev_adapter)
+
+
+        # build transformer architecture.
+        self.bev_h = bev_h
+        self.bev_w = bev_w
+        self.positional_encoding = build_positional_encoding(
+            positional_encoding)
+        self.transformer = build_transformer(transformer)
+
+        # build decoder
+        self.planning_steps = 1
+        self.reg_branch = nn.Sequential(
+            nn.Linear(self.embed_dims, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.planning_steps * 2),
+        )
+
+        # loss
+        self.loss_planning = build_loss(loss_planning)
+        self.loss_collision = []
+        for cfg in loss_collision:
+            self.loss_collision.append(build_loss(cfg))
+        self.loss_collision = nn.ModuleList(self.loss_collision)
+
+        self._init_layers()
+
+    def _init_layers(self):
+        """Initialize BEV prediction head."""
+        # plan query for the next frame.
+        self.plan_embedding = nn.Embedding(1, self.embed_dims)
+        # navi embed.
+        self.navi_embedding = nn.Embedding(3, self.embed_dims)
+        # mlp_fuser
+        fuser_dim = 2
+        self.mlp_fuser = nn.Sequential(
+                nn.Linear(self.embed_dims*fuser_dim, self.embed_dims),
+                nn.LayerNorm(self.embed_dims),
+                nn.ReLU(inplace=True),
+            )
+
+    def init_weights(self):
+        """Initialize weights of the DeformDETR head."""
+        try:
+            self.transformer.init_weights()
+            # Initialization of embeddings.
+            normal_(self.plan_embedding)
+            normal_(self.navi_embedding)
+            xavier_init(self.mlp_fuser, distribution='uniform', bias=0.)
+        except:
+            pass
+    
+    def loss(self, outs_planning, sdc_planning, sdc_planning_mask, future_gt_bbox=None):
+        """
+            outs_planning:      B,Lout,mode=1,2
+            sdc_planning:       B,Lout,3   下一帧的x,y,yaw    当前帧帧lidar坐标系下
+            sdc_planning_mask:  B,Lout,2   valid_frmae=1
+            future_gt_bbox:     Lout*[N_box个bbox_3d]  ref帧lidar坐标系下, future bbox_3d
+        """
+        loss_dict = dict()
+        for i in range(len(self.loss_collision)):
+            loss_collision = self.loss_collision[i](outs_planning, sdc_planning[..., :3], torch.any(sdc_planning_mask, dim=-1), future_gt_bbox)
+            loss_dict[f'loss_collision_{i}'] = loss_collision          
+        loss_ade = self.loss_planning(outs_planning, sdc_planning, torch.any(sdc_planning_mask, dim=-1))
+        loss_dict.update(dict(loss_ade=loss_ade))
+        return loss_dict
+
+    @auto_fp16(apply_to=('bev_feats'))
+    def forward(self, bev_feats, command):
+        """ Forward function for each frame.
+
+        Args:
+            bev_feats: bev feats of current frame, with shape of (bs, bev_h * bev_w, embed_dim)
+            command: bs                    0:Right  1:Left  2:Forward
+        """
+        # bev_feat
+        # grid sample
+        bev_feats = rearrange(bev_feats, 'b (w h) c -> b c h w', h=self.bev_h, w=self.bev_w)
+        bev_feats = self.bev_sampler(bev_feats)
+        # plugin adapter
+        if self.with_adapter:
+            bev_feats = bev_feats + self.bev_adapter(bev_feats)  # residual connection
+
+        # bev refine
+        bs = bev_feats.shape[0]
+        dtype = bev_feats.dtype
+        bev_feats = rearrange(bev_feats, 'b c h w -> b (w h) c')
+
+        # # 1. plan_query
+        # plan_query = select_traj
+        plan_query = self.plan_embedding.weight.to(dtype)   # 1,C
+        plan_query = plan_query[None]   # B,1,C       
+        # navi_embed
+        navi_embed = self.navi_embedding.weight[command]    # 1,C
+        navi_embed = navi_embed[None]   # B,1,C
+        # mlp_fuser
+        plan_query = torch.cat([plan_query, navi_embed], dim=-1)
+        plan_query = self.mlp_fuser(plan_query) # B,1,C
+
+        # 3. bev_feats
+        bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
+                               device=plan_query.device).to(dtype)
+        bev_pos = self.positional_encoding(bev_mask).to(dtype)  # bs, bev_dims, bev_h, bev_w
+
+        # 5. do transformer layers to get pose features.
+        plan_query = self.transformer(
+            plan_query,           # B, 1, c
+            bev_feats,              # B, h*w, c
+            bev_pos=bev_pos,        # B, c, h,w
+        )  # bs, 1, c
+        
+        # 6. plan regression
+        next_pose = self.reg_branch(plan_query).view((-1, self.planning_steps, 2))   # B,mode=1,2
+        return next_pose
