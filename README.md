@@ -213,4 +213,7 @@ python viz/viz_occ.py ${_viz_pcd_path} # 结果保存在 ./viz/figs/
 --future_length 1 
 --show_mo_time_change # whether not to visulize movable objects with time_change colors
 --show_traj # whether not to visulize pred ego_trajs 推荐show_traj配合show_mo_time_change使用，并将future_length调到3及以上
+
+# Step4. Create Video
+python viz/create_video.py --figs_path ./viz/figs
 ```

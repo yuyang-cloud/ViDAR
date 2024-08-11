@@ -346,7 +346,7 @@ def parse_args():
     parser.add_argument(
         '--canva-size', type=int, default=1000, help='Size of canva in pixel')
     parser.add_argument(
-        '--future-length',
+        '--future_length',
         type=int,
         default=1,
         help='Number of visulize future frames')
