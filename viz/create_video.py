@@ -92,6 +92,11 @@ def create_video_from_images(folder_path, nusc, fps=10):
     # video with occs
     save_video_imgs(occs, folder_path, output_video_name='occ.mp4', fps=fps)
 
+    # rename subfolders
+    for old_name, timestamp in zip(subfolders, timestamps):
+        new_name = f"{timestamp}_{old_name}"
+        os.rename(os.path.join(folder_path, old_name), os.path.join(folder_path, new_name))
+
 
 def process_folders(base_folder, nusc, fps=10):
     for folder in os.listdir(base_folder):

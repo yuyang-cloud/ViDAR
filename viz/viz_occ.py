@@ -489,6 +489,7 @@ def main():
         # load pose_pred
         if args.show_traj:
             pred_traj = pred_data['pose_pred']
+            pred_traj = pred_traj * np.array([[-1, 1]])
         else:
             pred_traj = None
 
