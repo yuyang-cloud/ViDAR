@@ -186,7 +186,7 @@ class ViDARHeadTemplate(BaseModule):
         if self.use_fourier:
             self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_vel + 256 * use_steering + 256 * use_command + 256 * use_plan_traj
         elif not self.use_fourier:
-            self.action_condition_dims = 4 * use_can_bus + 4 * use_vel_steering + 1 * use_vel + 1 * use_steering + 1 * use_command + 2 * use_plan_traj
+            self.action_condition_dims = 4 * use_can_bus + 4 * use_vel_steering + 2 * use_vel + 1 * use_steering + 1 * use_command + 2 * use_plan_traj
 
         # Network configurations.
         self.num_pred_fcs = num_pred_fcs
@@ -462,7 +462,7 @@ class ViDARHeadTemplate(BaseModule):
                 action_condition = torch.cat([action_condition, steering], dim=-1)
         
         if action_condition is not None:
-            action_condition = self.fusion_mlp(action_condition)
+            action_condition = self.fusion_mlp(action_condition.float())
 
         #  * sum different query embedding together.
         #    (bs, bev_h * bev_w, dims)
