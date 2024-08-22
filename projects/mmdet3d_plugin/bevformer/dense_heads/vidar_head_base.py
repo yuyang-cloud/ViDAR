@@ -108,11 +108,12 @@ class ViDARHeadTemplate(BaseModule):
                  can_bus_norm=True,
                  can_bus_dims=(0, 1, 2, 17),
                  use_plan_traj=True,
-                 condition_ca_add='add',
                  use_command=False,
                  use_vel_steering=False,
                  use_vel=False,
                  use_steering=False,
+                 condition_ca_add='add',
+                 use_fourier=True,
 
                  # target BEV configurations.
                  bev_h=30,
@@ -139,6 +140,10 @@ class ViDARHeadTemplate(BaseModule):
         self.real_w = self.pc_range[3] - self.pc_range[0]
         self.real_h = self.pc_range[4] - self.pc_range[1]
 
+        # action_condition
+        self.condition_ca_add = condition_ca_add
+        self.use_fourier = use_fourier
+
         # memory queue
         self.memory_queue_len = memory_queue_len
         self.turn_on_flow = turn_on_flow
@@ -155,31 +160,33 @@ class ViDARHeadTemplate(BaseModule):
         # vel_steering
         self.use_vel_steering = use_vel_steering
         self.vel_steering_dims = 4        # (vx, vy, v_yaw, steering)
-        if self.use_vel_steering:
+        if self.use_vel_steering and self.use_fourier:
             self.fourier_embed_velsteering = Fourier_Embed(self.vel_steering_dims, self.fourier_nhidden)
         # vel
         self.use_vel = use_vel
         self.vel_dims = 2        # (vx, vy, v_yaw)
-        if self.use_vel:
+        if self.use_vel and self.use_fourier:
             self.fourier_embed_vel = Fourier_Embed(self.vel_dims, self.fourier_nhidden)
         # steering
         self.use_steering = use_steering
         self.steering_dims = 1        # (vx, vy, v_yaw, steering)
-        if self.use_steering:
+        if self.use_steering and self.use_fourier:
             self.fourier_embed_steering = Fourier_Embed(self.steering_dims, self.fourier_nhidden)
         # command
         self.use_command = use_command
         self.command_dims = 1             # command
-        if self.use_command:
+        if self.use_command and self.use_fourier:
             self.fourier_embed_command = Fourier_Embed(self.command_dims, self.fourier_nhidden)
         # plan_traj
         self.use_plan_traj = use_plan_traj
         self.plan_traj_dims = 2
-        if self.use_plan_traj:
+        if self.use_plan_traj and self.use_fourier:
             self.fourier_embed_plantraj = Fourier_Embed(self.plan_traj_dims, self.fourier_nhidden)
         # action_condition
-        self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_vel + 256 * use_steering + 256 * use_command + 256 * use_plan_traj
-        self.condition_ca_add = condition_ca_add
+        if self.use_fourier:
+            self.action_condition_dims = 256 * use_can_bus + 256 * use_vel_steering + 256 * use_vel + 256 * use_steering + 256 * use_command + 256 * use_plan_traj
+        elif not self.use_fourier:
+            self.action_condition_dims = 4 * use_can_bus + 4 * use_vel_steering + 1 * use_vel + 1 * use_steering + 1 * use_command + 2 * use_plan_traj
 
         # Network configurations.
         self.num_pred_fcs = num_pred_fcs
@@ -259,11 +266,8 @@ class ViDARHeadTemplate(BaseModule):
         self.prev_frame_embedding = nn.Parameter(torch.Tensor(self.memory_queue_len, self.embed_dims))
         # Embeds for CanBus information.
         # Use position & orientation information of next frame's canbus.
-        if (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj) and self.condition_ca_add == 'add':
-            can_bus_input_dim = self.action_condition_dims
-        elif (self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj) and self.condition_ca_add == 'ca':
-            can_bus_input_dim = self.action_condition_dims
         if self.use_can_bus or self.use_command or self.use_vel_steering or self.use_vel or self.use_steering or self.use_plan_traj:
+            can_bus_input_dim = self.action_condition_dims
             self.fusion_mlp = nn.Sequential(
                 nn.Linear(can_bus_input_dim, self.embed_dims),
                 nn.ReLU(inplace=True),
@@ -403,7 +407,7 @@ class ViDARHeadTemplate(BaseModule):
             cur_can_bus = np.array(cur_can_bus)[:, self.can_bus_dims]  # bs, 18
             cur_can_bus = torch.from_numpy(cur_can_bus).to(dtype).to(bev_pos.device)    # bs,4  (delta_x, delta_y, delta_z, delta_yaw)
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 cur_can_bus = self.fourier_embed_canbus(cur_can_bus)
             action_condition = cur_can_bus
 
@@ -411,14 +415,14 @@ class ViDARHeadTemplate(BaseModule):
             #  * Plan Traj
             cur_can_bus = plan_traj[:, -1, :2].float() # bs, 2
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 cur_can_bus = self.fourier_embed_plantraj(cur_can_bus)
             action_condition = cur_can_bus
 
         if self.use_command:
             command = command.unsqueeze(0)  # bs,1 (command)
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 command = self.fourier_embed_command(command)
             if action_condition is None:
                 action_condition = command
@@ -428,7 +432,7 @@ class ViDARHeadTemplate(BaseModule):
         if self.use_vel_steering:
             # vel_steering: bs,4  (vx, vy, v_yaw, steering)
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 vel_steering = self.fourier_embed_velsteering(vel_steering)
             if action_condition is None:
                 action_condition = vel_steering
@@ -439,7 +443,7 @@ class ViDARHeadTemplate(BaseModule):
             # vel_steering: bs,4  (vx, vy, v_yaw, steering)
             vel = vel_steering[:, :self.vel_dims]
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 vel = self.fourier_embed_vel(vel)
             if action_condition is None:
                 action_condition = vel
@@ -450,7 +454,7 @@ class ViDARHeadTemplate(BaseModule):
             # vel_steering: bs,4  (vx, vy, v_yaw, steering)
             steering = vel_steering[:, -1:]
             # fourier embed
-            if self.condition_ca_add == 'ca':
+            if self.use_fourier:
                 steering = self.fourier_embed_steering(steering)
             if action_condition is None:
                 action_condition = steering
