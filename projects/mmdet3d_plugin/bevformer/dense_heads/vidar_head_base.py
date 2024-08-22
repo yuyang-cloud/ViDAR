@@ -155,7 +155,7 @@ class ViDARHeadTemplate(BaseModule):
         self.can_bus_norm = can_bus_norm
         self.use_can_bus = use_can_bus
         self.can_bus_dims = can_bus_dims  # (delta_x, delta_y, delta_z, delta_yaw)
-        if self.use_can_bus:
+        if self.use_can_bus and self.use_fourier:
             self.fourier_embed_canbus = Fourier_Embed(len(self.can_bus_dims), self.fourier_nhidden)
         # vel_steering
         self.use_vel_steering = use_vel_steering
