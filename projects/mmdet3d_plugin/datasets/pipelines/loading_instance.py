@@ -451,7 +451,7 @@ class LoadInstanceWithFlow(object):
 
             for key, value in results.items():
                 if key in ['sample_token', 'centerness', 'offset', 'flow', 'time_receptive_field', "indices", \
-                   'segmentation','instance','attribute_label','sequence_length', 'instance_dict', 'instance_map', 'input_dict', 'egopose_list','ego2lidar_list','scene_token']:
+                   'segmentation','instance','attribute_label','sequence_length', 'instance_dict', 'instance_map', 'input_dict', 'egopose_list','ego2lidar_list','scene_token','img_metas']:
                     continue
                 results[key] = torch.cat(value, dim=0)
 
