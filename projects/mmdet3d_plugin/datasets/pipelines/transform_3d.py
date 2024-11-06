@@ -270,13 +270,14 @@ class CustomCollect3D(object):
         """
 
         data = {}
-        img_metas = {}
+        # img_metas = {}
 
-        for key in self.meta_keys:
-            if key in results:
-                img_metas[key] = results[key]
+        # for key in self.meta_keys:
+        #     if key in results:
+        #         img_metas[key] = results[key]
 
-        data['img_metas'] = DC(img_metas, cpu_only=True)
+        # data['img_metas'] = DC(img_metas, cpu_only=True)
+        data['img_metas'] = DC(results['img_metas'], cpu_only=True)
         for key in self.keys:
             if key not in results:
                 data[key] = None

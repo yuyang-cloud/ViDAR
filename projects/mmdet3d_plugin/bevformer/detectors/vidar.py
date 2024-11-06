@@ -267,7 +267,7 @@ class ViDAR(BEVFormer):
             ref_to_history_list = torch.cat([ref_to_history_list, ref_to_ref_list], dim=1)
         return ref_to_history_list
 
-    def _align_bev_coordnates(self, frame_idx, ref_to_history_list, img_metas, plan_traj):
+    def _align_bev_coordnates(self, frame_idx, ref_to_history_list, img_metas):
         """Align the bev_coordinates of frame_idx to each of history_frames.
 
         Args:
@@ -280,29 +280,13 @@ class ViDAR(BEVFormer):
                 transformation alignment.
         """
         bs, num_frame = ref_to_history_list.shape[:2]
-        translation_xy = torch.cumsum(plan_traj, dim=1)[:, -1, :2].float()   # bs,2  (delta_x, delta_y)  cur2ref under ref lidar_coord
 
         # 1. get future2ref and ref2future_matrix of frame_idx.
         future2ref = [img_meta['future2ref_lidar_transform'][frame_idx] for img_meta in img_metas]  # b, 4, 4
         future2ref = ref_to_history_list.new_tensor(np.array(future2ref))  # bs, 4, 4
-        # use translation_xy
-        if self.future_pred_head.use_plan_traj:
-            future2ref = future2ref.transpose(-1, -2)
-            future2ref[:, :2, 3] = translation_xy
-            future2ref = future2ref.transpose(-1, -2)
-            future2ref = future2ref.detach().clone()
 
         ref2future = [img_meta['ref2future_lidar_transform'][frame_idx] for img_meta in img_metas]  # b, 4, 4
         ref2future = ref_to_history_list.new_tensor(np.array(ref2future))  # bs, 4, 4
-        # use translation_xy
-        if self.future_pred_head.use_plan_traj:
-            ref2future = ref2future.transpose(-1, -2)
-            rot = ref2future[:, :3, :3]
-            translation_xyz = future2ref[:, 3, :3].unsqueeze(2)     # cur2ref
-            translation_xyz = -(rot @ translation_xyz).squeeze(2)   # ref2cur
-            ref2future[:, :3, 3] = translation_xyz
-            ref2future = ref2future.transpose(-1, -2)
-            ref2future = ref2future.detach().clone()
 
         # 2. compute the transformation matrix from current frame to all previous frames.
         future2ref = future2ref.unsqueeze(1).repeat(1, num_frame, 1, 1).contiguous()
@@ -417,14 +401,10 @@ class ViDAR(BEVFormer):
             future_frame_num = self.test_future_frame_num
 
         for future_frame_index in range(1, future_frame_num + 1):
-            if (not self.turn_on_plan) or (self.turn_on_plan and self.training and self.training_epoch < 12):
-                plan_traj = sdc_planning[:, :future_frame_index, :2]    # B,L_i,3  cur2prev under ref_lidar coord
-            else:
-                plan_traj = next_pose_preds    # B,L_i,3  cur2prev under ref_lidar coord
 
             # 1. obtain the coordinates of future BEV query to previous frames.
             tgt_grids, aligned_prev_grids, ref2future, future2history = self._align_bev_coordnates(
-                future_frame_index, ref_to_history_list, img_metas, plan_traj)
+                future_frame_index, ref_to_history_list, img_metas)
             # tgt_grids = bs,h*w,2                          bev_query_future_i point coordinates in future_i frame coordinates.
             # aligned_prev_grids = bs,h*w,history_num,2     bev_query_future_i point coordinates in historys frame coordinates.
             # ref2future = bs,4,4   history_lidar_to_future_i
@@ -438,8 +418,8 @@ class ViDAR(BEVFormer):
             # pred_feat: inter_num, bs, bev_h * bev_w, c
             if future_frame_index in valid_frames:  # compute loss if it is a valid frame.
                 pred_feat, bev_occ_pred, bev_sem_pred, san_saw_output = future_pred_head(
-                    prev_bev_input, img_metas, future_frame_index, plan_traj=plan_traj, command=command[:, future_frame_index], 
-                    vel_steering=vel_steering[:, future_frame_index], bev_sem_gts=bev_sem_gts, flow_3D=flow_3D, occ_3D=occ_3D_cur,
+                    prev_bev_input, img_metas, future_frame_index, plan_traj=None, command=None, 
+                    vel_steering=None, bev_sem_gts=bev_sem_gts, flow_3D=flow_3D, occ_3D=occ_3D_cur,
                     future2history=future2history, tgt_points=tgt_grids, bev_h=self.bev_h, bev_w=self.bev_w, ref_points=aligned_prev_grids)
                 next_bev_feats.append(pred_feat)
                 next_bev_occ.append(bev_occ_pred)
@@ -448,8 +428,8 @@ class ViDAR(BEVFormer):
             else:
                 with torch.no_grad():
                     pred_feat, bev_occ_pred, bev_sem_pred, san_saw_output = future_pred_head(
-                        prev_bev_input, img_metas, future_frame_index, plan_traj=plan_traj, command=command[:, future_frame_index],
-                        vel_steering=vel_steering[:, future_frame_index], bev_sem_gts=bev_sem_gts, flow_3D=flow_3D, occ_3D=occ_3D_cur,
+                        prev_bev_input, img_metas, future_frame_index, plan_traj=None, command=None,
+                        vel_steering=None, bev_sem_gts=bev_sem_gts, flow_3D=flow_3D, occ_3D=occ_3D_cur,
                         future2history=future2history, tgt_points=tgt_grids, bev_h=self.bev_h, bev_w=self.bev_w, ref_points=aligned_prev_grids)
                     next_bev_feats.append(pred_feat)
             
@@ -743,15 +723,13 @@ class ViDAR(BEVFormer):
 
     @auto_fp16(apply_to=('img', 'segmentation', 'flow', 'occ_label_flag', 'rel_poses', 'gt_modes', 'sdc_planning'))
     def forward_train(self,
-                      points=None,
-                      img_metas=None,
-                      img=None,
-                      gt_points=None,
+                      img_inputs_seq=None,
                       # occ_flow
                       segmentation=None,
                       instance=None,
                       flow=None,
-                      occ_label_flag=None,
+                      gt_occ=None,
+                      img_metas=None,
                       # ego-traj
                       rel_poses=None,
                       gt_modes=None,
@@ -786,6 +764,7 @@ class ViDAR(BEVFormer):
         Returns:
             dict: Losses of different branches.
         """
+        img = img_inputs_seq # B,Lin,Ncams,3,H,W
 
         # manually stop forward
         if self.only_generate_dataset:
@@ -934,11 +913,11 @@ class ViDAR(BEVFormer):
         # E. Compute Loss
         losses = dict()
         # E1. Compute loss for occ predictions.
-        losses_occupancy = self.compute_occ_loss(next_bev_preds, segmentation, valid_frames, occ_label_flag)
+        losses_occupancy = self.compute_occ_loss(next_bev_preds, segmentation, valid_frames)
         losses.update(losses_occupancy)
         # E2. Compute loss for flow predictions.
         if self.turn_on_flow:
-            losses_flow = self.compute_flow_loss(next_bev_preds_flow, flow, valid_frames, occ_label_flag)
+            losses_flow = self.compute_flow_loss(next_bev_preds_flow, flow, valid_frames)
             losses.update(losses_flow)
         # E3. Compute loss for plan regression.
         if self.turn_on_plan:
@@ -992,14 +971,13 @@ class ViDAR(BEVFormer):
 
 
     def forward_test(self, 
-                     img_metas, 
-                     img=None,
-                     gt_points=None, 
+                     img_inputs_seq=None,
                      # occ_flow
-                     segmentation=None, 
-                     instance=None, 
-                     flow=None, 
-                     occ_label_flag=None, 
+                     segmentation=None,
+                     instance=None,
+                     flow=None,
+                     gt_occ=None,
+                     img_metas=None,
                      # ego-traj
                      rel_poses=None, 
                      gt_modes=None, 
@@ -1014,6 +992,7 @@ class ViDAR(BEVFormer):
                      vel_steering=None,
                      **kwargs):
         """has similar implementation with train forward."""
+        img = img_inputs_seq # B,Lin,Ncams,3,H,W
 
         # manually stop forward
         if self.only_generate_dataset:

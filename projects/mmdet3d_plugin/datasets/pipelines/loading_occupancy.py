@@ -14,8 +14,7 @@ import copy
 @PIPELINES.register_module()
 class LoadOccupancy(object):
 
-    def __init__(self, to_float32=True, occ_path=None, grid_size=[512, 512, 40], pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], unoccupied=0, 
-                 time_history_field=2, time_future_field=2, gt_resize_ratio=1, use_fine_occ=False, test_mode=False):
+    def __init__(self, to_float32=True, occ_path=None, grid_size=[512, 512, 40], pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], unoccupied=0, gt_resize_ratio=1, use_fine_occ=False, test_mode=False):
         '''
         Read sequential fine-grained occupancy labels from nuScenes-Occupancy if use_fine_occ=True
         '''
@@ -28,9 +27,6 @@ class LoadOccupancy(object):
         self.voxel_size = (self.pc_range[3:] - self.pc_range[:3]) / self.grid_size
         self.gt_resize_ratio = gt_resize_ratio
         self.use_fine_occ = use_fine_occ
-
-        self.time_history_field = time_history_field
-        self.time_future_field = time_future_field
 
         self.test_mode = test_mode
 
@@ -48,26 +44,27 @@ class LoadOccupancy(object):
         return gt_occ_seq
 
     def get_seq_occ(self, results):
-        sequence_length = self.time_history_field + 1 + self.time_future_field
+        sequence_length = results['sequence_length']
         gt_occ_seq = []
 
         for count in range(sequence_length):
 
-            scene_token_cur = results['scene_token_list'][count]
-            lidar_token_cur = results['lidar_token_list'][count]
+            scene_token_cur = results['input_dict'][count]['scene_token']
+            lidar_token_cur = results['input_dict'][count]['lidar_token']
 
             rel_path = 'scene_{0}/occupancy/{1}.npy'.format(scene_token_cur, lidar_token_cur)
             #  [z y x cls] or [z y x vx vy vz cls]
             pcd = np.load(os.path.join(self.occ_path, rel_path))
             pcd_label = pcd[..., -1:]
-            # pcd_label[pcd_label==0] = 255
+            pcd_label[pcd_label==0] = 255
             pcd_np_cor = self.voxel2world(pcd[..., [2,1,0]] + 0.5)
             untransformed_occ = copy.deepcopy(pcd_np_cor)
 
             egopose_list = results['egopose_list']
             ego2lidar_list = results['ego2lidar_list']
-            present_global2ego = egopose_list[self.time_history_field]
-            present_ego2lidar = ego2lidar_list[self.time_history_field]
+            time_receptive_field = results['time_receptive_field']
+            present_global2ego = egopose_list[time_receptive_field - 1]
+            present_ego2lidar = ego2lidar_list[time_receptive_field - 1]
             cur_global2ego = egopose_list[count]
             cur_ego2lidar = ego2lidar_list[count]
 
@@ -103,30 +100,18 @@ class LoadOccupancy(object):
             processed_label = torch.from_numpy(processed_label)
 
             # # TODO: hard coding
-            # for otheridx in [0,1,8,11,12,13,14,15,16,17,18,255]:
+            # for otheridx in [0,1,7,8,11,12,13,14,15,16,17,18,255]:
             #     processed_label[processed_label==otheridx] = 0
-            # for vehidx in [2,3,4,5,6,7,9,10]:
+            # for vehidx in [2,3,4,5,6,9,10]:
             #     processed_label[processed_label==vehidx] = 1
 
             gt_occ_seq.append(processed_label)
 
         gt_occ_seq = torch.stack(gt_occ_seq)
-
-        # breakpoint()
-        # vis_occ = gt_occ_seq[2].max(-1)[0].cpu().numpy()
-        # import matplotlib.pyplot as plt
-        # plt.imshow(vis_occ)
-        # plt.show()
-        # breakpoint()
         return gt_occ_seq
     
 
     def __call__(self, results):
-        if not results['occ_load_flag']:    # mem-efficient下只加载ref帧的occ_label
-            return results
-        if not results['use_fine_occ']:
-            return results
-
         if self.use_fine_occ:
             results['gt_occ'] = self.get_seq_occ(results)
         else:

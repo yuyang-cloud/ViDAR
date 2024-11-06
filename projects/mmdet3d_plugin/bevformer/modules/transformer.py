@@ -75,7 +75,7 @@ class PerceptionTransformer(BaseModule):
             torch.Tensor(self.num_cams, self.embed_dims))
         self.reference_points = nn.Linear(self.embed_dims, 3)
         self.can_bus_mlp = nn.Sequential(
-            nn.Linear(18, self.embed_dims // 2),
+            nn.Linear(9, self.embed_dims // 2),
             nn.ReLU(inplace=True),
             nn.Linear(self.embed_dims // 2, self.embed_dims),
             nn.ReLU(inplace=True),

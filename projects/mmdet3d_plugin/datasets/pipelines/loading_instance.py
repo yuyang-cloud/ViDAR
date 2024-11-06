@@ -13,7 +13,7 @@ import time
 @PIPELINES.register_module()
 class LoadInstanceWithFlow(object):
     def __init__(self, cam4docc_dataset_path, grid_size=[512, 512, 40], pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], background=0, 
-                    time_history_field=2, time_future_field=2, use_flow=True, use_separate_classes=False, mem_efficient=True, use_lyft=False):
+                    use_flow=True, use_separate_classes=False, use_lyft=False):
         '''
         Loading sequential occupancy labels and instance flows for training and testing
 
@@ -39,11 +39,6 @@ class LoadInstanceWithFlow(object):
         self.background = background
         self.use_flow = use_flow
         self.use_separate_classes = use_separate_classes
-        self.mem_efficient = mem_efficient
-        self.time_receptive_field = time_history_field + 1
-
-        self.time_history_field = time_history_field
-        self.time_future_field = time_future_field
 
         self.use_lyft = use_lyft
 
@@ -141,7 +136,7 @@ class LoadInstanceWithFlow(object):
         instance_dict = input_seq_data['instance_dict']     # instance_dict={ 'instance_token':{'timestep':[出现的帧timestep], 'translation':[出现的帧T], 'rotation'[出现的帧R], 'size':, 'instance_id':, 'semantic_id':, 'attribute_label':[出现的帧int(visibility_token)]} }
         egopose_list = input_seq_data['egopose_list']       # 7*[2] egopose_T, egopose_R
         ego2lidar_list = input_seq_data['ego2lidar_list']   # 7*[2] ego2lidar_T, ego2lidar_R
-        time_receptive_field = self.time_receptive_field   # 3
+        time_receptive_field = input_seq_data['time_receptive_field']   # 3
 
         instance_fill_info = []
         
@@ -283,62 +278,45 @@ class LoadInstanceWithFlow(object):
         return center_label, offset_label
 
     def __call__(self, results):
-        if not results['occ_load_flag']:    # mem-efficient下只加载ref帧的occ_label
-            return results
-        if results['use_fine_occ']:
-            return results  
-        
-        elif not results['occ_label_flag']: # 非mem-efficient下  部分帧的occ_label不存在
-            sequence_length = self.time_history_field + 1 + self.time_future_field
-            results['segmentation'] = torch.ones((sequence_length, self.dimension[0], self.dimension[1], self.dimension[2])) * self.background   # 7,H,W,L  7帧voxel-wise semantic_label
-            results['flow'] = torch.ones((sequence_length, 3, self.dimension[0]//4, self.dimension[1]//4, self.dimension[2]//4)) * 255           # 7,3,h,w,l 7帧voxel-wise flow_label(delta_xyz)
-            results['instance'] = torch.ones((sequence_length, self.dimension[0], self.dimension[1], self.dimension[2])) * self.background           # 7,H,W,L  7帧voxel-wise instance_id
-            # results['attribute_label'] =  torch.zeros((self.dimension[0], self.dimension[1], self.dimension[2])).unsqueeze(0)    # 1,H,W,L
-
-            # # mem efficient
-            # results['segmentation'] = torch.ones((1, self.dimension[0], self.dimension[1], self.dimension[2])) * self.background   # 7,H,W,L  7帧voxel-wise semantic_label
-            # results['flow'] = torch.ones((1, 3, self.dimension[0]//4, self.dimension[1]//4, self.dimension[2]//4)) * 255           # 7,3,h,w,l 7帧voxel-wise flow_label(delta_xyz)
-
-            return results
-
-        # mem-efficient下加载ref帧的occ_label   非mem-efficient下，加载当前帧的occ_label
         assert 'segmentation' not in results.keys()
         assert 'instance' not in results.keys()
         assert 'attribute_label' not in results.keys()
 
-        time_receptive_field = self.time_receptive_field
+        time_receptive_field = results['time_receptive_field']
 
         prefix = "MMO" if self.use_separate_classes else "GMO"
         if self.use_lyft:
             prefix = prefix + "_lyft"
-        
 
         seg_label_dir = os.path.join(self.cam4docc_dataset_path, prefix, "segmentation")
         if not os.path.exists(seg_label_dir):
             os.mkdir(seg_label_dir)
-        seg_label_path = os.path.join(seg_label_dir, results['scene_token']+"_"+results['lidar_token'])
+        seg_label_path = os.path.join(seg_label_dir, \
+            results['input_dict'][time_receptive_field-1]['scene_token']+"_"+results['input_dict'][time_receptive_field-1]['lidar_token'])
 
         instance_label_dir = os.path.join(self.cam4docc_dataset_path, prefix, "instance")
         if not os.path.exists(instance_label_dir):
             os.mkdir(instance_label_dir)
-        instance_label_path = os.path.join(instance_label_dir, results['scene_token']+"_"+results['lidar_token'])
+        instance_label_path = os.path.join(instance_label_dir, \
+            results['input_dict'][time_receptive_field-1]['scene_token']+"_"+results['input_dict'][time_receptive_field-1]['lidar_token'])
 
         flow_label_dir = os.path.join(self.cam4docc_dataset_path, prefix, "flow")
         if not os.path.exists(flow_label_dir):
             os.mkdir(flow_label_dir)        
-        flow_label_path = os.path.join(flow_label_dir, results['scene_token']+"_"+results['lidar_token'])
+        flow_label_path = os.path.join(flow_label_dir, \
+            results['input_dict'][time_receptive_field-1]['scene_token']+"_"+results['input_dict'][time_receptive_field-1]['lidar_token'])
 
         segmentation_list = []  # 7*[1,H,W,L]  voxel-wise semantic_label
         if os.path.exists(seg_label_path+".npz"):
             gt_segmentation_arr = np.load(seg_label_path+".npz",allow_pickle=True)['arr_0'] # 7*[kept, 4]  7帧non-empty voxel的坐标+semantic_label
             for j in range(len(gt_segmentation_arr)):
-                # # mem efficient
-                # if j != self.time_history_field:
-                #     continue
-                
                 segmentation = np.zeros((self.dimension[0], self.dimension[1], self.dimension[2])) * self.background
                 gt_segmentation = gt_segmentation_arr[j]
                 gt_segmentation = torch.from_numpy(gt_segmentation)
+                # for i in range(gt_segmentation.shape[0]):
+                #     cur_ind = gt_segmentation[i, :3].long()
+                #     cur_label = gt_segmentation[i, -1]
+                #     segmentation[cur_ind[0],cur_ind[1],cur_ind[2]] = cur_label
                 segmentation[gt_segmentation[:, 0].long(), gt_segmentation[:, 1].long(), gt_segmentation[:, 2].long()] = gt_segmentation[:, -1]
                 segmentation = torch.from_numpy(segmentation).unsqueeze(0)
                 segmentation_list.append(segmentation)
@@ -348,13 +326,13 @@ class LoadInstanceWithFlow(object):
             gt_instance_arr = np.load(instance_label_path+".npz",allow_pickle=True)['arr_0']  # 7*[kept, 4]  7帧non-empty voxel的坐标+instance_id
 
             for j in range(len(gt_instance_arr)):
-                # # mem efficient
-                # if j != self.time_history_field:
-                #     continue
-
                 instance = np.ones((self.dimension[0], self.dimension[1], self.dimension[2])) * self.background
                 gt_instance = gt_instance_arr[j]
                 gt_instance = torch.from_numpy(gt_instance)
+                # for i in range(gt_instance.shape[0]):
+                #     cur_ind = gt_instance[i, :3].long()
+                #     cur_label = gt_instance[i, -1]
+                #     instance[cur_ind[0],cur_ind[1],cur_ind[2]] = cur_label
                 instance[gt_instance[:, 0].long(), gt_instance[:, 1].long(), gt_instance[:, 2].long()] = gt_instance[:, -1]
                 instance = torch.from_numpy(instance).unsqueeze(0)
                 instance_list.append(instance)
@@ -364,30 +342,30 @@ class LoadInstanceWithFlow(object):
             gt_flow_arr = np.load(flow_label_path+".npz",allow_pickle=True)['arr_0']     # 7*[kept, 6]  non-empty voxel的坐标(xyz)+flow_label(delta_xyz)
                                                                                          # flow_label: voxel-wise 从当前帧的某个voxel 到所属实例在上一帧的中心voxel 的delta_x,delta_y,delta_z
             for j in range(len(gt_flow_arr)):
-                # # mem efficient
-                # if j != self.time_history_field:
-                #     continue
-
                 flow = np.ones((3, self.dimension[0]//4, self.dimension[1]//4, self.dimension[2]//4)) * 255
                 gt_flow = gt_flow_arr[j]
                 gt_flow = torch.from_numpy(gt_flow)
+                # for i in range(gt_flow.shape[0]):
+                #     cur_ind = gt_flow[i, :3].long()
+                #     cur_label = gt_flow[i, 3:]
+                #     flow[0, cur_ind[0],cur_ind[1],cur_ind[2]] = cur_label[0]
+                #     flow[1, cur_ind[0],cur_ind[1],cur_ind[2]] = cur_label[1]
+                #     flow[2, cur_ind[0],cur_ind[1],cur_ind[2]] = cur_label[2]
                 flow[:, gt_flow[:, 0].long(), gt_flow[:, 1].long(), gt_flow[:, 2].long()] = gt_flow[:, 3:].permute(1, 0)
                 flow = torch.from_numpy(flow).unsqueeze(0)  # 1,3,h,w,l
                 flow_list.append(flow)
 
         if os.path.exists(seg_label_path+".npz") and os.path.exists(instance_label_path+".npz") and os.path.exists(flow_label_path+".npz"):
             results['segmentation'] = torch.cat(segmentation_list, dim=0)   # 7,H,W,L  7帧voxel-wise semantic_label
-            results['flow'] = torch.cat(flow_list, dim=0).float()           # 7,3,h,w,l 7帧voxel-wise flow_label(delta_xyz)
             results['instance'] = torch.cat(instance_list, dim=0)           # 7,H,W,L  7帧voxel-wise instance_id
-            # results['attribute_label'] =  torch.from_numpy(np.zeros((self.dimension[0], self.dimension[1], self.dimension[2]))).unsqueeze(0)    # 1,H,W,L
+            results['attribute_label'] =  torch.from_numpy(np.zeros((self.dimension[0], self.dimension[1], self.dimension[2]))).unsqueeze(0)    # 1,H,W,L
+            results['flow'] = torch.cat(flow_list, dim=0).float()           # 7,3,h,w,l 7帧voxel-wise flow_label(delta_xyz)
 
-            # breakpoint()
-            # vis_occ = segmentation_list[0].max(-1)[0][0].cpu().numpy()
-            # import matplotlib.pyplot as plt
-            # plt.imshow(vis_occ)
-            # plt.show()
-            # breakpoint()
-
+            for key, value in results.items():
+                if key in ['sample_token', 'centerness', 'offset', 'flow', 'time_receptive_field', "indices", \
+                  'segmentation','instance','attribute_label','sequence_length', 'instance_dict', 'instance_map', 'input_dict', 'egopose_list','ego2lidar_list','scene_token','img_metas']:
+                    continue
+                results[key] = torch.cat(value, dim=0)
             return results
 
         else:
@@ -398,7 +376,7 @@ class LoadInstanceWithFlow(object):
             segmentation_saved_list = []
             instance_saved_list = []
 
-            sequence_length = self.time_history_field + 1 + self.time_future_field
+            sequence_length = results['sequence_length']    # 3+4
             self.visible_instance_set = set()
             for self.counter in range(sequence_length):
                 segmentation, instance, attribute_label = self.get_label(results)  # 当前帧voxel-wise的instance_id, semantic_label, attribute_label
@@ -448,6 +426,7 @@ class LoadInstanceWithFlow(object):
             results['flow'] = self.get_flow_label(results, ignore_index=255)    # seq_len,3,h,w,l   voxel-wise 从当前帧的某个voxel 到所属实例在上一帧的中心voxel 的delta_x,delta_y,delta_z
             
             flow_saved_list = []
+            sequence_length = results['sequence_length']
             d0 = self.dimension[0]//4
             d1 = self.dimension[1]//4 
             d2 = self.dimension[2]//4 
@@ -470,8 +449,10 @@ class LoadInstanceWithFlow(object):
             flow_saved_list2 = [item.cpu().detach().numpy() for item in flow_saved_list]
             np.savez(flow_label_path, flow_saved_list2) # 7*[kept, 6]  non-empty voxel的坐标+flow_label
 
-            # # mem efficient
-            # results['segmentation'] = results['segmentation'][self.time_history_field].unsqueeze(0)
-            # results['flow'] = results['flow'][self.time_history_field].unsqueeze(0)
+            for key, value in results.items():
+                if key in ['sample_token', 'centerness', 'offset', 'flow', 'time_receptive_field', "indices", \
+                   'segmentation','instance','attribute_label','sequence_length', 'instance_dict', 'instance_map', 'input_dict', 'egopose_list','ego2lidar_list','scene_token']:
+                    continue
+                results[key] = torch.cat(value, dim=0)
 
         return results
