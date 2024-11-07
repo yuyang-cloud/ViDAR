@@ -741,15 +741,57 @@ class Cam4DOccLyftDataset(Dataset):
         '''
         eval_results = {}
         
-        ''' calculate IOU '''
-        hist_for_iou = sum(results['hist_for_iou'])
-        ious = cm_to_ious(hist_for_iou)
-        res_table, res_dic = format_iou_results(ious, return_dic=True)
-        for key, val in res_dic.items():
-            eval_results['IOU_{}'.format(key)] = val
-        if logger is not None:
-            logger.info('IOU Evaluation')
-            logger.info(res_table)        
+        ''' calculate IOU of current and future frames'''
+        if 'hist_for_iou' in results.keys():
+            IoU_results_current_future = {}
+            hist_for_iou = sum(results['hist_for_iou'])
+            ious = cm_to_ious(hist_for_iou)
+            res_table, res_dic = format_iou_results(ious, return_dic=True)
+            for key, val in res_dic.items():
+                IoU_results_current_future['IOU_{}'.format(key)] = val
+            if logger is not None:
+                logger.info('IOU Evaluation of current and future frames:')
+                logger.info(res_table)        
+            eval_results.update(IoU_of_Current_Future=IoU_results_current_future)
+        
+        ''' calculate IOU of current frame'''
+        if 'hist_for_iou_current' in results.keys():
+            IoU_results_current = {}
+            hist_for_iou = sum(results['hist_for_iou_current'])
+            ious = cm_to_ious(hist_for_iou)
+            res_table, res_dic = format_iou_results(ious, return_dic=True)
+            for key, val in res_dic.items():
+                IoU_results_current['IOU_{}'.format(key)] = val
+            if logger is not None:
+                logger.info('IOU Evaluation of current frame:')
+                logger.info(res_table)        
+            eval_results.update(IoU_of_Current=IoU_results_current)
+        
+        ''' calculate IOU of future frame'''
+        if 'hist_for_iou_future' in results.keys():
+            IoU_results_future = {}
+            hist_for_iou = sum(results['hist_for_iou_future'])
+            ious = cm_to_ious(hist_for_iou)
+            res_table, res_dic = format_iou_results(ious, return_dic=True)
+            for key, val in res_dic.items():
+                IoU_results_future['IOU_{}'.format(key)] = val
+            if logger is not None:
+                logger.info('IOU Evaluation of future frames:')
+                logger.info(res_table)        
+            eval_results.update(IoU_of_Future=IoU_results_future)
+        
+        ''' calculate IOU of future frame with time_weighting'''
+        if 'hist_for_iou_future_time_weighting' in results.keys():
+            IoU_results_future_time_weighting = {}
+            hist_for_iou = sum(results['hist_for_iou_future_time_weighting'])
+            ious = cm_to_ious(hist_for_iou)
+            res_table, res_dic = format_iou_results(ious, return_dic=True)
+            for key, val in res_dic.items():
+                IoU_results_future_time_weighting['IOU_{}'.format(key)] = val
+            if logger is not None:
+                logger.info('IOU Evaluation of future frames with time weighting:')
+                logger.info(res_table)        
+            eval_results.update(IoU_of_Future_with_Time_Weighting=IoU_results_future_time_weighting)
 
         ''' calculate VPQ '''
         if 'vpq_metric' in results.keys() and 'vpq_len' in results.keys():
