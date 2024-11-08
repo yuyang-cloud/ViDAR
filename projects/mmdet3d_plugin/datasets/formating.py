@@ -59,14 +59,15 @@ def format_iou_results(mean_ious, return_dic=False):
             1: 'movable objects',
         }
     elif len(mean_ious) == 9:
+        # Lyft do not contain construction and trailer
         class_map = {
             0: 'free',
             1: 'bicycle',
             2: 'bus',
             3: 'car',
-            4: 'construction',
+            # 4: 'construction',
             5: 'motorcycle',
-            6: 'trailer',
+            # 6: 'trailer',
             7: 'truck',
             8: 'pedestrian',
         }
@@ -93,7 +94,7 @@ def format_iou_results(mean_ious, return_dic=False):
     x = PrettyTable()
     x.field_names = ['class', 'IoU']
     class_names = list(class_map.values())
-    class_ious = mean_ious
+    class_ious = [mean_ious[idx] for idx in class_map.keys()]   # Lyft do not contain construction and trailer
     dic = {}
     
     for cls_name, cls_iou in zip(class_names, class_ious):
