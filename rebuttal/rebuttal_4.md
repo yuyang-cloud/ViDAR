@@ -1,0 +1,13 @@
+Q1: Motivation of Conditional Normalization.  
+A1: The original BEV embeddings, derived from 2D image features into 3D space, **exhibit ray-shaped patterns (we encourage reviewers to refer to our visualization results in Appendix Fig. 2)**. This phenomenon occurs because waypoints along the same ray in 3D space often correspond to the same image pixel, resulting in similar feature representations. To address this issue:
+
+- We propose semantic-conditional normalization, which emphasizes BEV features with higher semantic-conditional probabilities, making the **BEV embeddings more semantically discriminative** (Refer to Response 1 to Reviewer CPT6 and Appendix Fig.2).  
+- For motion-conditional normalization, we account for two types of motions: ego-motion (we encode ego pose transformation into $(\gamma^e, \beta^e)$); and other agents' motion (we encode the predicted voxel-wise dynamic flow $\mathcal{F} \in \mathbb{R} ^ {h \times w \times d \times 3}$ into $(\gamma^f, \beta^f)$).  
+- Then, we normalize the BEV features by $\gamma * F^{bev} + \beta$ (Main Paper Fig.3). The normalization parameters, derived from semantic or motion predictions, effectively **transform the feature distribution by integrating semantic and dynamic information**.
+
+Q2: Reason of using predicted trajectory performs better than GT in Table 1-3 but opposite in Table 4.  
+A2.1: **Tables 1-3** demonstrate that using predicted trajectories achieves **better occupancy forecasting results** than using GT in the perception task, which can be attributed to two factors:  
+- When using predicted trajectories, the planner module performs cross-attention between the trajectories and BEV features, allowing the planning loss to constrain the BEV features to account for ego motion. As a result, the **planning constraints enhance perception performance**, consistent with the findings in UniAD.  
+- We use the predicted trajectories for both training and testing phases. This **facilitates model learning with predicted trajectories**, enabling improved performance during testing.  
+
+A2.2: **Table 4** shows that using GT trajectories as the condition **performs better in the planning task**. We note that using GT trajectory may lead to the leakage of GT labels to the planner, as demonstrated by Li [CVPR24]. Therefore, it serves as the **upper-bound planning result when using GT trajectories**, and we utilize predicted trajectories for the planning task to ensure a fair comparison.
